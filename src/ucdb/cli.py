@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 
 import click
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.table import Table
 
@@ -20,6 +21,11 @@ from .process import (
     process_repository,
 )
 from .scan import scan_repository
+
+# Load .env from the current working directory (or any parent), without
+# overriding values already present in the real environment. This must run
+# before Click resolves option defaults that read os.environ.
+load_dotenv(find_dotenv(usecwd=True))
 
 DEFAULT_DB = "ucdb.sqlite3"
 console = Console()
@@ -36,7 +42,29 @@ def _ai_config(model: str | None) -> AIConfig:
     return cfg
 
 
+def _load_env_file(
+    ctx: click.Context, param: click.Parameter, value: str | None
+) -> str | None:
+    if value:
+        path = Path(value)
+        if not path.is_file():
+            raise click.BadParameter(f"{value!r} is not a readable file")
+        load_dotenv(dotenv_path=path, override=True)
+    return value
+
+
 @click.group(help="Universal Code Database — convert legal documents into SQLite.")
+@click.option(
+    "--env-file",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    is_eager=True,
+    expose_value=False,
+    callback=_load_env_file,
+    help="Load environment variables from this file (overrides existing values). "
+    "By default, a .env in the current directory or any parent is loaded "
+    "without overriding the real environment.",
+)
 @click.option(
     "--db",
     "db_path",

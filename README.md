@@ -141,6 +141,19 @@ ucdb import ./pre-generated.xml \
 | `UCDB_USLM_XSD`      | Path to a USLM XSD; enables strict schema validation              | *(off)*          |
 | `UCDB_JSON`          | If set, `process`/`import` also dump a JSON summary               | *(off)*          |
 
+All of these can also be supplied through a `.env` file. On startup `ucdb` looks
+for a `.env` in the current working directory (and any parent), loading it
+without overriding values already present in the real environment — so an
+explicit `export OPENAI_API_KEY=…` always wins. Pass `--env-file <path>` to
+load an explicit file that *does* override existing values.
+
+```bash
+# .env
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=http://localhost:11434/v1
+UCDB_MODEL=gpt-5.4-mini
+```
+
 ## Components
 
 ### Core library
