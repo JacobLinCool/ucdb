@@ -1,0 +1,66 @@
+[project]
+name = "ucdb"
+version = "0.1.0"
+description = "Universal Code Database — convert legacy legal documents (PDF/DOCX/ODT/MD/TXT) into a queryable SQLite database based on the United States Legislative Markup (USLM) XML schema."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Jacob Lin", email = "jacoblincool@gmail.com" },
+]
+keywords = [
+    "legal",
+    "legislation",
+    "uslm",
+    "sqlite",
+    "ai",
+    "document-processing",
+    "pdf",
+    "docx",
+    "markdown",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Legal Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Text Processing :: Markup :: XML",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "click>=8.1.7",
+    "lxml>=5.3.0",
+    "odfpy>=1.4.1",
+    "openai>=1.54.0",
+    "pypdf>=5.1.0",
+    "python-docx>=1.1.2",
+    "rich>=13.9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JacobLinCool/universal-code-database"
+Repository = "https://github.com/JacobLinCool/universal-code-database"
+Issues = "https://github.com/JacobLinCool/universal-code-database/issues"
+
+[project.scripts]
+ucdb = "ucdb.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ucdb"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/ucdb",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
