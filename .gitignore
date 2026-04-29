@@ -183,3 +183,7 @@ cython_debug/
 .DS_Store
 
 ucdb.sqlite3
+ucdb.sqlite3-shm
+ucdb.sqlite3-wal
+
+/input

@@ -215,6 +215,22 @@ def import_cmd(
     _summarize([result])
 
 
+@main.command("serve", help="Run a read-only web UI for browsing the database.")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8000, show_default=True, type=int)
+@click.option("--open", "open_browser", is_flag=True, help="Open the browser.")
+@click.pass_context
+def serve_cmd(
+    ctx: click.Context,
+    host: str,
+    port: int,
+    open_browser: bool,
+) -> None:
+    from .web import serve
+
+    serve(_db_path(ctx), host=host, port=port, open_browser=open_browser)
+
+
 @main.group("query", help="Inspect data stored in the database.")
 def query_group() -> None:
     pass

@@ -510,6 +510,7 @@ That sequence — search → history → diff → blame — covers the four ques
 | `ucdb process <root>` | Run the AI pipeline over every supported document. |
 | `ucdb process-one <file> --code-id … --version …` | Pipeline for a single document. |
 | `ucdb import <xml> --code-id … --version … [--source <doc>]` | Import pre-generated USLM XML, skipping the AI step. |
+| `ucdb serve [--host 127.0.0.1] [--port 8000] [--open]` | Start the read-only web browser for search, docs, diffs, and metadata. |
 
 ### Querying
 

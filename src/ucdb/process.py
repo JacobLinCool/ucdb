@@ -131,12 +131,18 @@ def process_document(
             ai_model=cfg.model,
             ai_base_url=cfg.base_url,
         )
-        xml_text = generate_uslm_xml(
+        prev = db.previous_version(conn, document.code_id, document.version_label)
+        parent_xml = prev["xml_content"] if prev is not None else None
+        parent_label = prev["version_label"] if prev is not None else None
+        ai_result = generate_uslm_xml(
             text,
             code_id=document.code_id,
             version_label=document.version_label,
             config=cfg,
+            parent_xml=parent_xml,
+            parent_label=parent_label,
         )
+        xml_text = ai_result.xml
         xml_hash = hashing.hash_text(xml_text)
         db.log_event(
             conn,
@@ -149,6 +155,9 @@ def process_document(
                 "xml_hash": xml_hash,
                 "provider": cfg.provider_name(),
                 "model": cfg.model,
+                "parent_version_label": parent_label,
+                "parent_xml_chars": len(parent_xml) if parent_xml else 0,
+                "usage": ai_result.usage.as_dict(),
             },
         )
 

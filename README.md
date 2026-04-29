@@ -120,6 +120,9 @@ ucdb query codes
 ucdb query versions tax-code
 ucdb query sections 1
 ucdb query search "income"
+
+# 6. browse the collected database in a local web UI
+ucdb serve --open
 ```
 
 If you have already produced USLM XML out-of-band, skip the AI step:
@@ -186,6 +189,7 @@ ucdb scan <root>                       list documents in an input repo
 ucdb process <root>                    run the full AI pipeline
 ucdb process-one <file> --code-id … --version …
 ucdb import <xml>     --code-id … --version … [--source <doc>]
+ucdb serve                             browse the database at http://127.0.0.1:8000
 ucdb query codes
 ucdb query versions <code-id>
 ucdb query sections <version-id>

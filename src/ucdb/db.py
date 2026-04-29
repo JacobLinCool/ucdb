@@ -156,13 +156,19 @@ CREATE INDEX IF NOT EXISTS idx_section_lines_origin_version ON section_lines(ori
 -- Full-text index over section heading/content/identifier. Stored as an
 -- external-content FTS5 table that mirrors `sections` via triggers, so the
 -- canonical row data lives in `sections` and the index is purely derived.
+-- Multilingual full-text index. We use the `trigram` tokenizer because the
+-- default `unicode61` treats every run of CJK characters as a single token,
+-- making substring/phrase queries against Chinese / Japanese / Korean text
+-- effectively unusable. Trigram indexes 3-codepoint sliding windows so any
+-- query of length >= 3 codepoints (in any script) can match by substring,
+-- and shorter / prefix queries can be expressed via FTS5 `LIKE`/`GLOB` style.
 CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
     heading,
     content,
     identifier,
     content='sections',
     content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
+    tokenize='trigram'
 );
 
 CREATE TRIGGER IF NOT EXISTS sections_ai AFTER INSERT ON sections BEGIN
@@ -274,6 +280,16 @@ MIGRATIONS: dict[str, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_section_lines_section ON section_lines(section_id)",
         "CREATE INDEX IF NOT EXISTS idx_section_lines_origin_version ON section_lines(origin_version_id)",
     ],
+    # Switch the FTS tokenizer from unicode61 to trigram for proper CJK /
+    # multilingual substring matching. Drop the old triggers + virtual table,
+    # then let the SCHEMA_SQL re-create them with the new tokenizer and
+    # rebuild the index from `sections`.
+    "4": [
+        "DROP TRIGGER IF EXISTS sections_au",
+        "DROP TRIGGER IF EXISTS sections_ad",
+        "DROP TRIGGER IF EXISTS sections_ai",
+        "DROP TABLE IF EXISTS sections_fts",
+    ],
 }
 
 
@@ -304,8 +320,12 @@ def init_db(db_path: Path | str) -> None:
         # Run migrations first so the SCHEMA_SQL re-application (with its
         # IF NOT EXISTS clauses) doesn't reference columns that an older DB
         # hasn't grown yet.
-        _migrate(conn)
+        needs_fts_rebuild = _migrate(conn)
         conn.executescript(SCHEMA_SQL)
+        if needs_fts_rebuild:
+            # FTS tokenizer changed: SCHEMA_SQL has just recreated the empty
+            # external-content virtual table, so backfill from `sections`.
+            conn.execute("INSERT INTO sections_fts(sections_fts) VALUES('rebuild')")
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", SCHEMA_VERSION),
@@ -327,17 +347,27 @@ def _current_schema_version(conn: sqlite3.Connection) -> str | None:
     return row[0] if row else None
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Apply pending migrations to bring an existing DB up to ``SCHEMA_VERSION``."""
+def _migrate(conn: sqlite3.Connection) -> bool:
+    """Apply pending migrations to bring an existing DB up to ``SCHEMA_VERSION``.
+
+    Returns True if a migration ran that requires the FTS index to be rebuilt
+    after the canonical SCHEMA_SQL has finished re-creating the virtual table.
+    """
     current = _current_schema_version(conn) or "0"
+    needs_fts_rebuild = False
     while current in MIGRATIONS and current != SCHEMA_VERSION:
         for stmt in MIGRATIONS[current]:
             conn.execute(stmt)
+        if current == "3":
+            # Migration 3 → 4 dropped sections_fts; the caller will re-create
+            # the virtual table from SCHEMA_SQL and must then rebuild it.
+            needs_fts_rebuild = True
         current = str(int(current) + 1)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", current),
         )
+    return needs_fts_rebuild
 
 
 def upsert_code(
