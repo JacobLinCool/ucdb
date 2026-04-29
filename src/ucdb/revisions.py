@@ -1,16 +1,4 @@
-"""Compute revisions (version-to-version diffs) and persist them.
-
-A *revision* compares two ``document_versions`` rows of the same code. Sections
-are matched across versions by their USLM ``identifier`` attribute — the only
-key the schema guarantees to be stable across revisions. Sections without an
-identifier are reported as anonymous additions/removals because we have no
-reliable way to align them.
-
-The :func:`compare_section_sets` function is the pure comparison core, used
-both by :func:`compute_revision` (which persists results into ``revisions`` /
-``section_changes``) and by the on-the-fly :func:`db.diff_versions` query that
-serves arbitrary version pairs.
-"""
+"""Structural diff computation for Akoma Ntoso expressions."""
 
 from __future__ import annotations
 
@@ -23,17 +11,16 @@ from . import db
 
 
 @dataclass
-class SectionChange:
-    """A single section-level change between two versions."""
-
-    change_type: str  # "added" | "removed" | "modified"
-    identifier: str | None
-    level: str
+class NodeChange:
+    change_type: str  # added | removed | modified
+    node_eid: str | None
+    node_type: str
     num: str | None
     heading: str | None
-    from_section_id: int | None
-    to_section_id: int | None
-    text_diff: str | None  # unified diff for "modified", else None
+    from_node_id: int | None
+    to_node_id: int | None
+    text_diff: str | None
+    details: dict
 
 
 @dataclass
@@ -53,23 +40,7 @@ class RevisionStats:
     unchanged: int
 
 
-def _index_by_identifier(
-    rows: list[sqlite3.Row],
-) -> tuple[dict[str, sqlite3.Row], list[sqlite3.Row]]:
-    """Split *rows* into (identified_by_id, anonymous)."""
-    keyed: dict[str, sqlite3.Row] = {}
-    anonymous: list[sqlite3.Row] = []
-    for row in rows:
-        ident = row["identifier"]
-        if ident:
-            keyed[ident] = row
-        else:
-            anonymous.append(row)
-    return keyed, anonymous
-
-
 def text_diff(before: str | None, after: str | None) -> str:
-    """Render a unified diff between two section bodies. Public for reuse."""
     a = (before or "").splitlines(keepends=True)
     b = (after or "").splitlines(keepends=True)
     if not a and not b:
@@ -81,145 +52,79 @@ def text_diff(before: str | None, after: str | None) -> str:
     return "".join(difflib.unified_diff(a, b, fromfile="before", tofile="after", n=2))
 
 
-def compare_section_sets(
-    from_sections: list[sqlite3.Row],
-    to_sections: list[sqlite3.Row],
-) -> tuple[list[SectionChange], CompareStats]:
-    """Compare two sets of section rows by USLM identifier.
-
-    Sections without an identifier are reported as anonymous additions/removals
-    (they cannot be aligned across versions). Headings and content are both
-    compared; a difference in either marks the section as ``modified``.
-    """
-    to_by_id, to_anon = _index_by_identifier(to_sections)
-    from_by_id, from_anon = _index_by_identifier(from_sections)
-
-    changes: list[SectionChange] = []
+def compare_node_sets(
+    from_nodes: list[sqlite3.Row],
+    to_nodes: list[sqlite3.Row],
+) -> tuple[list[NodeChange], CompareStats]:
+    from_by_eid = {row["node_eid"]: row for row in from_nodes if row["node_eid"]}
+    to_by_eid = {row["node_eid"]: row for row in to_nodes if row["node_eid"]}
+    changes: list[NodeChange] = []
     added = removed = modified = unchanged = 0
 
-    for ident, to_row in to_by_id.items():
-        from_row = from_by_id.get(ident)
+    for eid, to_row in to_by_eid.items():
+        from_row = from_by_eid.get(eid)
         if from_row is None:
             added += 1
-            changes.append(
-                SectionChange(
-                    change_type="added",
-                    identifier=ident,
-                    level=to_row["level"],
-                    num=to_row["num"],
-                    heading=to_row["heading"],
-                    from_section_id=None,
-                    to_section_id=to_row["id"],
-                    text_diff=None,
-                )
-            )
+            changes.append(_change("added", to_row, None, to_row, None, {}))
             continue
-
-        same_content = (from_row["content"] or "") == (to_row["content"] or "")
-        same_heading = (from_row["heading"] or "") == (to_row["heading"] or "")
-        if same_content and same_heading:
+        detail = _detail_changes(from_row, to_row)
+        if not detail:
             unchanged += 1
             continue
-
         modified += 1
         changes.append(
-            SectionChange(
-                change_type="modified",
-                identifier=ident,
-                level=to_row["level"],
-                num=to_row["num"],
-                heading=to_row["heading"],
-                from_section_id=from_row["id"],
-                to_section_id=to_row["id"],
-                text_diff=text_diff(from_row["content"], to_row["content"]),
+            _change(
+                "modified",
+                to_row,
+                from_row,
+                to_row,
+                text_diff(from_row["text"], to_row["text"])
+                if "text_changed" in detail
+                else "",
+                {"events": detail},
             )
         )
 
-    for ident, from_row in from_by_id.items():
-        if ident in to_by_id:
+    for eid, from_row in from_by_eid.items():
+        if eid in to_by_eid:
             continue
         removed += 1
-        changes.append(
-            SectionChange(
-                change_type="removed",
-                identifier=ident,
-                level=from_row["level"],
-                num=from_row["num"],
-                heading=from_row["heading"],
-                from_section_id=from_row["id"],
-                to_section_id=None,
-                text_diff=None,
-            )
-        )
+        changes.append(_change("removed", from_row, from_row, None, None, {}))
 
-    for row in to_anon:
-        added += 1
-        changes.append(
-            SectionChange(
-                change_type="added",
-                identifier=None,
-                level=row["level"],
-                num=row["num"],
-                heading=row["heading"],
-                from_section_id=None,
-                to_section_id=row["id"],
-                text_diff=None,
-            )
-        )
-    for row in from_anon:
-        removed += 1
-        changes.append(
-            SectionChange(
-                change_type="removed",
-                identifier=None,
-                level=row["level"],
-                num=row["num"],
-                heading=row["heading"],
-                from_section_id=row["id"],
-                to_section_id=None,
-                text_diff=None,
-            )
-        )
-
-    return changes, CompareStats(
-        added=added, removed=removed, modified=modified, unchanged=unchanged
-    )
+    return changes, CompareStats(added, removed, modified, unchanged)
 
 
 def compute_revision(
     conn: sqlite3.Connection,
     *,
-    code_id: str,
-    to_version_id: int,
-    from_version_id: int | None,
+    work_id: str,
+    to_expression_id: int,
+    from_expression_id: int | None,
 ) -> RevisionStats:
-    """Compute and persist a revision between two versions.
-
-    If a revision row already exists for the (from, to) pair, it is replaced.
-    """
     conn.execute(
-        "DELETE FROM revisions WHERE from_version_id IS ? AND to_version_id = ?",
-        (from_version_id, to_version_id),
+        "DELETE FROM revisions WHERE from_expression_id IS ? AND to_expression_id = ?",
+        (from_expression_id, to_expression_id),
     )
-
-    to_sections = db.list_sections(conn, to_version_id)
-    from_sections = (
-        db.list_sections(conn, from_version_id) if from_version_id is not None else []
+    to_nodes = db.list_nodes(conn, to_expression_id)
+    from_nodes = (
+        db.list_nodes(conn, from_expression_id)
+        if from_expression_id is not None
+        else []
     )
-    changes, stats = compare_section_sets(from_sections, to_sections)
+    changes, stats = compare_node_sets(from_nodes, to_nodes)
 
     cur = conn.execute(
         """
         INSERT INTO revisions(
-            code_id, from_version_id, to_version_id,
-            sections_added, sections_removed, sections_modified, sections_unchanged,
+            work_id, from_expression_id, to_expression_id,
+            nodes_added, nodes_removed, nodes_modified, nodes_unchanged,
             summary, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            code_id,
-            from_version_id,
-            to_version_id,
+            work_id,
+            from_expression_id,
+            to_expression_id,
             stats.added,
             stats.removed,
             stats.modified,
@@ -236,32 +141,67 @@ def compute_revision(
         ),
     )
     revision_id = int(cur.lastrowid)
-
     for change in changes:
         conn.execute(
             """
-            INSERT INTO section_changes(
-                revision_id, change_type, identifier, level, num, heading,
-                from_section_id, to_section_id, text_diff
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO node_changes(
+                revision_id, change_type, node_eid, node_type, num, heading,
+                from_node_id, to_node_id, text_diff, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 revision_id,
                 change.change_type,
-                change.identifier,
-                change.level,
+                change.node_eid,
+                change.node_type,
                 change.num,
                 change.heading,
-                change.from_section_id,
-                change.to_section_id,
+                change.from_node_id,
+                change.to_node_id,
                 change.text_diff,
+                json.dumps(change.details, ensure_ascii=False)
+                if change.details
+                else None,
             ),
         )
-
     return RevisionStats(
-        revision_id=revision_id,
-        added=stats.added,
-        removed=stats.removed,
-        modified=stats.modified,
-        unchanged=stats.unchanged,
+        revision_id, stats.added, stats.removed, stats.modified, stats.unchanged
+    )
+
+
+def _detail_changes(from_row: sqlite3.Row, to_row: sqlite3.Row) -> list[str]:
+    events: list[str] = []
+    if (from_row["parent_id"] is None) != (to_row["parent_id"] is None):
+        events.append("node_moved")
+    if (from_row["node_type"] or "") != (to_row["node_type"] or ""):
+        events.append("type_changed")
+    if (from_row["num"] or "") != (to_row["num"] or ""):
+        events.append("num_changed")
+    if (from_row["heading"] or "") != (to_row["heading"] or ""):
+        events.append("heading_changed")
+    if (from_row["normalized_text_hash"] or "") != (
+        to_row["normalized_text_hash"] or ""
+    ):
+        events.append("text_changed")
+    return events
+
+
+def _change(
+    change_type: str,
+    snapshot: sqlite3.Row,
+    from_row: sqlite3.Row | None,
+    to_row: sqlite3.Row | None,
+    diff: str | None,
+    details: dict,
+) -> NodeChange:
+    return NodeChange(
+        change_type=change_type,
+        node_eid=snapshot["node_eid"],
+        node_type=snapshot["node_type"],
+        num=snapshot["num"],
+        heading=snapshot["heading"],
+        from_node_id=int(from_row["id"]) if from_row is not None else None,
+        to_node_id=int(to_row["id"]) if to_row is not None else None,
+        text_diff=diff,
+        details=details,
     )

@@ -1,9 +1,9 @@
-"""End-to-end test: build a 10-snapshot legal-code fixture and verify
-search, version-pair diff, line-level blame, and section history.
+"""End-to-end test: build a 10-snapshot legal-work fixture and verify
+search, version-pair diff, line-node_type blame, and node history.
 
-The test runs without a network or AI backend — we feed pre-generated USLM XML
-through :func:`ucdb.process.import_xml_file`, which exercises the same ingest,
-revision, and line-provenance code paths as the AI pipeline.
+The test runs without a network or AI backend — we feed pre-generated Akoma Ntoso XML
+through :func:`ucdb.process.import_akn_file`, which exercises the same ingest,
+revision, and line-provenance work paths as the AI pipeline.
 
 Invocation
 ----------
@@ -30,9 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixture  # noqa: E402
 
 from ucdb import db  # noqa: E402
-from ucdb.process import import_xml_file  # noqa: E402
+from ucdb.exporters import (  # noqa: E402
+    export_expression_json,
+    export_markdown,
+    export_rag_jsonl,
+)
+from ucdb.process import import_akn_file  # noqa: E402
 
-CODE_ID = "tax-code"
+WORK_ID = "tax-work"
 
 
 def _seed(workdir: Path) -> Path:
@@ -40,16 +45,14 @@ def _seed(workdir: Path) -> Path:
     db_path = workdir / "db.sqlite3"
     db.init_db(db_path)
 
-    versions = fixture.build_versions()
-    for version_label, sections in versions:
+    expressions = fixture.build_versions()
+    for version_label, nodes in expressions:
         xml_path = workdir / f"{version_label}.xml"
-        xml_path.write_text(
-            fixture.to_uslm_xml(version_label, sections), encoding="utf-8"
-        )
+        xml_path.write_text(fixture.to_akn_xml(version_label, nodes), encoding="utf-8")
         with db.connect(db_path) as conn:
-            result = import_xml_file(
+            result = import_akn_file(
                 conn,
-                code_id=CODE_ID,
+                work_id=WORK_ID,
                 version_label=version_label,
                 xml_path=xml_path,
                 validate_schema=False,
@@ -65,30 +68,30 @@ def _seed(workdir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_all_versions_imported(workdir: Path) -> None:
+def test_all_expressions_imported(workdir: Path) -> None:
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        rows = db.list_versions(conn, CODE_ID)
+        rows = db.list_expressions(conn, WORK_ID)
     assert len(rows) == 10
     assert all(row["status"] == "imported" for row in rows)
 
 
-def test_section_lines_populated(workdir: Path) -> None:
+def test_node_lines_populated(workdir: Path) -> None:
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        # Every section ever inserted should have at least one blame row.
-        sections_total = conn.execute(
-            "SELECT COUNT(*) FROM sections WHERE level = 'section'"
+        # Every node ever inserted should have at least one blame row.
+        nodes_total = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE node_type = 'article'"
         ).fetchone()[0]
-        sections_with_lines = conn.execute(
+        nodes_with_lines = conn.execute(
             """
             SELECT COUNT(DISTINCT s.id)
-            FROM sections s JOIN section_lines sl ON sl.section_id = s.id
-            WHERE s.level = 'section'
+            FROM nodes s JOIN node_lines sl ON sl.node_id = s.id
+            WHERE s.node_type = 'article'
             """
         ).fetchone()[0]
-        assert sections_total == sections_with_lines, (
-            f"some sections lack blame rows: {sections_total - sections_with_lines}"
+        assert nodes_total == nodes_with_lines, (
+            f"some nodes lack blame rows: {nodes_total - nodes_with_lines}"
         )
 
 
@@ -96,12 +99,12 @@ def test_blame_v1_lines_attributed_to_v1(workdir: Path) -> None:
     """Lines that survive untouched from v1 to v10 must blame to v1."""
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        v10 = db.find_version_by_label(conn, CODE_ID, "2024-07-01")
-        # /tax-code/s10 is edited only in v8 (truncation). Lines 1..7 survive
+        v10 = db.find_expression_by_label(conn, WORK_ID, "2024-07-01")
+        # art_10 is edited only in v8 (truncation). Lines 1..7 survive
         # unchanged from v1; in v10 they must still blame to v1.
-        s10 = db.find_section_by_identifier(conn, int(v10["id"]), "/tax-code/s10")
-        lines = db.get_section_lines(conn, int(s10["id"]))
-        assert lines, "expected blame lines for /tax-code/s10 at v10"
+        s10 = db.find_node_by_eid(conn, int(v10["id"]), "art_10")
+        lines = db.get_node_lines(conn, int(s10["id"]))
+        assert lines, "expected blame lines for art_10 at v10"
         # s10 was truncated to 7 lines in v8, then untouched.
         assert len(lines) == 7
         for line in lines:
@@ -115,9 +118,9 @@ def test_blame_modified_line_attributed_to_editing_version(workdir: Path) -> Non
     """The income-definition rewrite in v2 must show v2 as the line origin."""
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        v10 = db.find_version_by_label(conn, CODE_ID, "2024-07-01")
-        s1 = db.find_section_by_identifier(conn, int(v10["id"]), "/tax-code/s1")
-        lines = db.get_section_lines(conn, int(s1["id"]))
+        v10 = db.find_expression_by_label(conn, WORK_ID, "2024-07-01")
+        s1 = db.find_node_by_eid(conn, int(v10["id"]), "art_1")
+        lines = db.get_node_lines(conn, int(s1["id"]))
         income_lines = [
             line for line in lines if line["text"].startswith("Income means")
         ]
@@ -138,18 +141,18 @@ def test_blame_modified_line_attributed_to_editing_version(workdir: Path) -> Non
         assert digital_asset[0]["origin_version_label"] == "2023-07-01"
 
 
-def test_blame_resets_when_section_is_reintroduced(workdir: Path) -> None:
-    """Section /tax-code/s5 is removed in v4 then re-added with new text in v7.
+def test_blame_resets_when_node_is_reintroduced(workdir: Path) -> None:
+    """Section art_5 is removed in v4 then re-added with new text in v7.
 
     Every line of s5 at v10 must blame to v7 — the re-introduction version.
     Blame must NOT transitively jump back to v1 across the deletion gap.
     """
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        v10 = db.find_version_by_label(conn, CODE_ID, "2024-07-01")
-        s5 = db.find_section_by_identifier(conn, int(v10["id"]), "/tax-code/s5")
+        v10 = db.find_expression_by_label(conn, WORK_ID, "2024-07-01")
+        s5 = db.find_node_by_eid(conn, int(v10["id"]), "art_5")
         assert s5 is not None, "s5 should exist again at v10"
-        lines = db.get_section_lines(conn, int(s5["id"]))
+        lines = db.get_node_lines(conn, int(s5["id"]))
         assert lines, "s5 must have blame rows"
         for line in lines:
             assert line["origin_version_label"] == "2023-01-01", (
@@ -158,35 +161,35 @@ def test_blame_resets_when_section_is_reintroduced(workdir: Path) -> None:
             )
 
 
-def test_diff_versions_arbitrary_pair(workdir: Path) -> None:
+def test_diff_expressions_arbitrary_pair(workdir: Path) -> None:
     """Diff between v1 and v10 must reflect the net cumulative change."""
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        v1 = db.find_version_by_label(conn, CODE_ID, "2020-01-01")
-        v10 = db.find_version_by_label(conn, CODE_ID, "2024-07-01")
-        changes, stats = db.diff_versions(
+        v1 = db.find_expression_by_label(conn, WORK_ID, "2020-01-01")
+        v10 = db.find_expression_by_label(conn, WORK_ID, "2024-07-01")
+        changes, stats = db.diff_expressions(
             conn,
-            code_id=CODE_ID,
-            from_version_id=int(v1["id"]),
-            to_version_id=int(v10["id"]),
+            work_id=WORK_ID,
+            from_expression_id=int(v1["id"]),
+            to_expression_id=int(v10["id"]),
         )
 
-    by_ident = {c.identifier: c for c in changes if c.identifier}
+    by_ident = {c.node_eid: c for c in changes if c.node_eid}
 
     # s11 (Privacy) was added in v2 → still added relative to v1.
-    assert by_ident["/tax-code/s11"].change_type == "added"
+    assert by_ident["art_11"].change_type == "added"
 
     # s5 (Credits) was rewritten on the round-trip; net effect vs v1 is "modified".
-    assert by_ident["/tax-code/s5"].change_type == "modified"
+    assert by_ident["art_5"].change_type == "modified"
 
     # Tax rate (s3) returned to 25% but the surtax stayed at 4% — so modified.
-    assert by_ident["/tax-code/s3"].change_type == "modified"
+    assert by_ident["art_3"].change_type == "modified"
 
     # s2 was edited multiple times, net effect is modified.
-    assert by_ident["/tax-code/s2"].change_type == "modified"
+    assert by_ident["art_2"].change_type == "modified"
 
     # s12 was added in v6 then repealed in v9 → must NOT appear in v1↔v10 diff.
-    assert "/tax-code/s12" not in by_ident
+    assert "art_12" not in by_ident
 
     # Net counts: 1 addition (s11), 0 removals, several modifications.
     assert stats.added == 1, f"expected 1 added, got {stats.added}"
@@ -194,22 +197,22 @@ def test_diff_versions_arbitrary_pair(workdir: Path) -> None:
     assert stats.modified >= 4
 
 
-def test_diff_versions_filtered_by_identifier(workdir: Path) -> None:
+def test_diff_expressions_filtered_by_node_eid(workdir: Path) -> None:
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        v1 = db.find_version_by_label(conn, CODE_ID, "2020-01-01")
-        v10 = db.find_version_by_label(conn, CODE_ID, "2024-07-01")
-        changes, stats = db.diff_versions(
+        v1 = db.find_expression_by_label(conn, WORK_ID, "2020-01-01")
+        v10 = db.find_expression_by_label(conn, WORK_ID, "2024-07-01")
+        changes, stats = db.diff_expressions(
             conn,
-            code_id=CODE_ID,
-            from_version_id=int(v1["id"]),
-            to_version_id=int(v10["id"]),
-            identifier="/tax-code/s3",
+            work_id=WORK_ID,
+            from_expression_id=int(v1["id"]),
+            to_expression_id=int(v10["id"]),
+            node_eid="art_3",
         )
     assert len(changes) == 1
     change = changes[0]
     assert change.change_type == "modified"
-    assert change.identifier == "/tax-code/s3"
+    assert change.node_eid == "art_3"
     assert change.text_diff is not None
     assert "twenty-five" in change.text_diff
     assert "four percent" in change.text_diff  # surtax stayed bumped
@@ -217,12 +220,12 @@ def test_diff_versions_filtered_by_identifier(workdir: Path) -> None:
 
 
 def test_history_lists_every_touch(workdir: Path) -> None:
-    """The Filing Requirements section was touched only in v5."""
+    """The Filing Requirements node was touched only in v5."""
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        history_s2 = db.section_history(conn, CODE_ID, "/tax-code/s2")
-        history_s5 = db.section_history(conn, CODE_ID, "/tax-code/s5")
-        history_s12 = db.section_history(conn, CODE_ID, "/tax-code/s12")
+        history_s2 = db.node_history(conn, WORK_ID, "art_2")
+        history_s5 = db.node_history(conn, WORK_ID, "art_5")
+        history_s12 = db.node_history(conn, WORK_ID, "art_12")
 
     # s2: present in v1 (added vs nothing) + edited in v5 → 2 entries.
     s2_types = [h["change_type"] for h in history_s2]
@@ -245,49 +248,59 @@ def test_search_still_works(workdir: Path) -> None:
     """Sanity-check that FTS5 search still finds known phrases after ingest."""
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        rows = db.search_sections(conn, "twenty-five percent", code_id=CODE_ID)
+        rows = db.search_nodes(conn, "twenty-five percent", work_id=WORK_ID)
     assert rows, "FTS5 should match the standard-rate phrase"
     # The phrase appears in v1, v2, v10 (s3 returns to 25%) — at least one hit.
-    matched_versions = {row["version_label"] for row in rows}
-    assert "2020-01-01" in matched_versions or "2024-07-01" in matched_versions
+    matched_expressions = {row["version_label"] for row in rows}
+    assert "2020-01-01" in matched_expressions or "2024-07-01" in matched_expressions
+
+
+def test_exports_for_downstream_tools(workdir: Path) -> None:
+    db_path = _seed(workdir)
+    with db.connect(db_path) as conn:
+        v10 = db.find_expression_by_label(conn, WORK_ID, "2024-07-01")
+        json_text = export_expression_json(conn, int(v10["id"]))
+        rag_text = export_rag_jsonl(conn, int(v10["id"]))
+        markdown = export_markdown(conn, int(v10["id"]))
+
+    assert '"nodes"' in json_text
+    assert '"node_eid": "art_3"' in rag_text
+    assert '"canonical_hash"' in rag_text
+    assert "Tax Rates" in markdown
 
 
 def test_reprocess_is_idempotent(workdir: Path) -> None:
     """Re-importing every snapshot must keep counts stable, not duplicate rows."""
     db_path = _seed(workdir)
     with db.connect(db_path) as conn:
-        line_count_before = conn.execute(
-            "SELECT COUNT(*) FROM section_lines"
-        ).fetchone()[0]
+        line_count_before = conn.execute("SELECT COUNT(*) FROM node_lines").fetchone()[
+            0
+        ]
         revision_count_before = conn.execute(
-            "SELECT COUNT(*) FROM revisions WHERE code_id = ?", (CODE_ID,)
+            "SELECT COUNT(*) FROM revisions WHERE work_id = ?", (WORK_ID,)
         ).fetchone()[0]
 
-    versions = fixture.build_versions()
-    for version_label, sections in versions:
+    expressions = fixture.build_versions()
+    for version_label, nodes in expressions:
         xml_path = workdir / f"reimport-{version_label}.xml"
-        xml_path.write_text(
-            fixture.to_uslm_xml(version_label, sections), encoding="utf-8"
-        )
+        xml_path.write_text(fixture.to_akn_xml(version_label, nodes), encoding="utf-8")
         with db.connect(db_path) as conn:
-            import_xml_file(
+            import_akn_file(
                 conn,
-                code_id=CODE_ID,
+                work_id=WORK_ID,
                 version_label=version_label,
                 xml_path=xml_path,
                 validate_schema=False,
             )
 
     with db.connect(db_path) as conn:
-        line_count_after = conn.execute(
-            "SELECT COUNT(*) FROM section_lines"
-        ).fetchone()[0]
+        line_count_after = conn.execute("SELECT COUNT(*) FROM node_lines").fetchone()[0]
         revision_count_after = conn.execute(
-            "SELECT COUNT(*) FROM revisions WHERE code_id = ?", (CODE_ID,)
+            "SELECT COUNT(*) FROM revisions WHERE work_id = ?", (WORK_ID,)
         ).fetchone()[0]
 
     assert line_count_before == line_count_after, (
-        f"section_lines count changed on reimport: "
+        f"node_lines count changed on reimport: "
         f"{line_count_before} → {line_count_after}"
     )
     assert revision_count_before == revision_count_after

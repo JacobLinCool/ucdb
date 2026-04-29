@@ -14,17 +14,20 @@ from rich.table import Table
 
 from . import db
 from .ai import AIConfig
+from .exporters import (
+    export_expression_json,
+    export_html,
+    export_markdown,
+    export_rag_jsonl,
+)
 from .process import (
     ProcessResult,
-    import_xml_file,
+    import_akn_file,
     process_document,
     process_repository,
 )
-from .scan import scan_repository
+from .scan import FoundDocument, scan_repository
 
-# Load .env from the current working directory (or any parent), without
-# overriding values already present in the real environment. This must run
-# before Click resolves option defaults that read os.environ.
 load_dotenv(find_dotenv(usecwd=True))
 
 DEFAULT_DB = "ucdb.sqlite3"
@@ -53,7 +56,7 @@ def _load_env_file(
     return value
 
 
-@click.group(help="Universal Code Database — convert legal documents into SQLite.")
+@click.group(help="Universal Code Database — Akoma Ntoso legal data in SQLite.")
 @click.option(
     "--env-file",
     type=click.Path(dir_okay=False, path_type=str),
@@ -61,9 +64,7 @@ def _load_env_file(
     is_eager=True,
     expose_value=False,
     callback=_load_env_file,
-    help="Load environment variables from this file (overrides existing values). "
-    "By default, a .env in the current directory or any parent is loaded "
-    "without overriding the real environment.",
+    help="Load environment variables from this file.",
 )
 @click.option(
     "--db",
@@ -79,7 +80,7 @@ def main(ctx: click.Context, db_path: str) -> None:
     ctx.obj["db"] = db_path
 
 
-@main.command("init", help="Initialize a new database file.")
+@main.command("init", help="Initialize a UCDB 0.2 database.")
 @click.option("--force", is_flag=True, help="Recreate even if the file exists.")
 @click.pass_context
 def init_cmd(ctx: click.Context, force: bool) -> None:
@@ -94,12 +95,12 @@ def init_cmd(ctx: click.Context, force: bool) -> None:
 @click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def scan_cmd(root: Path) -> None:
     table = Table(title=f"Documents under {root}")
-    table.add_column("code-id")
+    table.add_column("work-id")
     table.add_column("version")
     table.add_column("file")
     count = 0
     for doc in scan_repository(root):
-        table.add_row(doc.code_id, doc.version_label, str(doc.path))
+        table.add_row(doc.work_id, doc.version_label, str(doc.path))
         count += 1
     console.print(table)
     console.print(f"[bold]{count}[/bold] document(s) found")
@@ -108,48 +109,39 @@ def scan_cmd(root: Path) -> None:
 @main.command("process", help="Run the full AI pipeline over an input repository.")
 @click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--model", default=None, help="Override the model (env: UCDB_MODEL).")
-@click.option(
-    "--reprocess",
-    is_flag=True,
-    help="Re-process even if a matching source hash is already imported.",
-)
-@click.option(
-    "--no-schema",
-    is_flag=True,
-    help="Skip XSD validation (well-formedness is always checked).",
-)
+@click.option("--language", default="zho", show_default=True)
+@click.option("--reprocess", is_flag=True)
+@click.option("--no-schema", is_flag=True, help="Skip XSD validation.")
 @click.pass_context
 def process_cmd(
     ctx: click.Context,
     root: Path,
     model: str | None,
+    language: str,
     reprocess: bool,
     no_schema: bool,
 ) -> None:
     cfg = _ai_config(model)
     if not cfg.api_key:
-        raise click.UsageError(
-            "OPENAI_API_KEY is not set. Configure your AI backend before "
-            "running `process` (use OPENAI_BASE_URL for compatible endpoints)."
-        )
+        raise click.UsageError("OPENAI_API_KEY is not set.")
     with db.connect(_db_path(ctx)) as conn:
         results = process_repository(
             conn,
             root,
             ai_config=cfg,
+            language=language,
             skip_existing=not reprocess,
             validate_schema=not no_schema,
-            progress=lambda phase, r: _print_progress(phase, r),
+            progress=_print_progress,
         )
     _summarize(results)
 
 
 @main.command("process-one", help="Process a single document file.")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--code-id", required=True, help="Code identifier (slug).")
-@click.option(
-    "--version", "version_label", required=True, help="Version label or date."
-)
+@click.option("--work-id", required=True)
+@click.option("--version", "version_label", required=True)
+@click.option("--language", default="zho", show_default=True)
 @click.option("--model", default=None)
 @click.option("--reprocess", is_flag=True)
 @click.option("--no-schema", is_flag=True)
@@ -157,78 +149,73 @@ def process_cmd(
 def process_one_cmd(
     ctx: click.Context,
     path: Path,
-    code_id: str,
+    work_id: str,
     version_label: str,
+    language: str,
     model: str | None,
     reprocess: bool,
     no_schema: bool,
 ) -> None:
-    from .scan import FoundDocument
-
     cfg = _ai_config(model)
     if not cfg.api_key:
         raise click.UsageError("OPENAI_API_KEY is not set.")
-    document = FoundDocument(code_id=code_id, version_label=version_label, path=path)
+    doc = FoundDocument(work_id=work_id, version_label=version_label, path=path)
     with db.connect(_db_path(ctx)) as conn:
         result = process_document(
             conn,
-            document,
+            doc,
             ai_config=cfg,
+            language=language,
             skip_existing=not reprocess,
             validate_schema=not no_schema,
         )
     _summarize([result])
 
 
-@main.command("import", help="Import a pre-generated USLM XML file.")
+@main.command("import-akn", help="Import a pre-generated Akoma Ntoso XML file.")
 @click.argument(
     "xml_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
-@click.option("--code-id", required=True)
+@click.option("--work-id", required=True)
 @click.option("--version", "version_label", required=True)
+@click.option("--language", default="zho", show_default=True)
+@click.option("--title", default=None)
+@click.option("--document-class", default="law", show_default=True)
+@click.option("--jurisdiction", default="tw", show_default=True)
 @click.option(
     "--source",
     "source_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Original source document for hashing (defaults to the XML file).",
 )
 @click.option("--no-schema", is_flag=True)
 @click.pass_context
-def import_cmd(
+def import_akn_cmd(
     ctx: click.Context,
     xml_path: Path,
-    code_id: str,
+    work_id: str,
     version_label: str,
+    language: str,
+    title: str | None,
+    document_class: str,
+    jurisdiction: str,
     source_path: Path | None,
     no_schema: bool,
 ) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        result = import_xml_file(
+        result = import_akn_file(
             conn,
-            code_id=code_id,
+            work_id=work_id,
             version_label=version_label,
             xml_path=xml_path,
             source_path=source_path,
+            language=language,
+            title=title,
+            document_class=document_class,
+            jurisdiction=jurisdiction,
             validate_schema=not no_schema,
         )
     _summarize([result])
-
-
-@main.command("serve", help="Run a read-only web UI for browsing the database.")
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--port", default=8000, show_default=True, type=int)
-@click.option("--open", "open_browser", is_flag=True, help="Open the browser.")
-@click.pass_context
-def serve_cmd(
-    ctx: click.Context,
-    host: str,
-    port: int,
-    open_browser: bool,
-) -> None:
-    from .web import serve
-
-    serve(_db_path(ctx), host=host, port=port, open_browser=open_browser)
 
 
 @main.group("query", help="Inspect data stored in the database.")
@@ -236,201 +223,182 @@ def query_group() -> None:
     pass
 
 
-@query_group.command("codes", help="List every legislative code.")
+@main.group("export", help="Export derived artifacts from canonical storage.")
+def export_group() -> None:
+    pass
+
+
+@export_group.command("json", help="Export one expression as normalized JSON.")
+@click.argument("expression_id", type=int)
 @click.pass_context
-def query_codes(ctx: click.Context) -> None:
+def export_json_cmd(ctx: click.Context, expression_id: int) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        rows = db.list_codes(conn)
-    table = Table(title="Codes")
+        click.echo(export_expression_json(conn, expression_id))
+
+
+@export_group.command("rag", help="Export one expression as RAG JSONL chunks.")
+@click.argument("expression_id", type=int)
+@click.pass_context
+def export_rag_cmd(ctx: click.Context, expression_id: int) -> None:
+    with db.connect(_db_path(ctx)) as conn:
+        click.echo(export_rag_jsonl(conn, expression_id), nl=False)
+
+
+@export_group.command("markdown", help="Export one expression as Markdown.")
+@click.argument("expression_id", type=int)
+@click.pass_context
+def export_markdown_cmd(ctx: click.Context, expression_id: int) -> None:
+    with db.connect(_db_path(ctx)) as conn:
+        click.echo(export_markdown(conn, expression_id), nl=False)
+
+
+@export_group.command("html", help="Export one expression as HTML.")
+@click.argument("expression_id", type=int)
+@click.pass_context
+def export_html_cmd(ctx: click.Context, expression_id: int) -> None:
+    with db.connect(_db_path(ctx)) as conn:
+        click.echo(export_html(conn, expression_id), nl=False)
+
+
+@query_group.command("works", help="List legal works.")
+@click.pass_context
+def query_works(ctx: click.Context) -> None:
+    with db.connect(_db_path(ctx)) as conn:
+        rows = db.list_works(conn)
+    table = Table(title="Works")
     table.add_column("id")
+    table.add_column("class")
     table.add_column("title")
-    table.add_column("created")
     table.add_column("updated")
     for row in rows:
         table.add_row(
-            row["id"], row["title"] or "", row["created_at"], row["updated_at"]
+            row["id"], row["document_class"], row["title"] or "", row["updated_at"]
         )
     console.print(table)
 
 
-@query_group.command("versions", help="List versions of a code.")
-@click.argument("code_id")
+@query_group.command("expressions", help="List expressions of a work.")
+@click.argument("work_id")
 @click.pass_context
-def query_versions(ctx: click.Context, code_id: str) -> None:
+def query_expressions(ctx: click.Context, work_id: str) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        rows = db.list_versions(conn, code_id)
-    table = Table(title=f"Versions of {code_id}")
+        rows = db.list_expressions(conn, work_id)
+    table = Table(title=f"Expressions of {work_id}")
     table.add_column("id", justify="right")
     table.add_column("version")
+    table.add_column("lang")
     table.add_column("status")
-    table.add_column("source hash")
-    table.add_column("xml hash")
-    table.add_column("ai")
-    table.add_column("validation")
+    table.add_column("hash")
     table.add_column("parent", justify="right")
     table.add_column("processed")
     for row in rows:
-        ai = row["ai_provider"] or ""
-        if row["ai_model"]:
-            ai = f"{ai}/{row['ai_model']}" if ai else row["ai_model"]
         table.add_row(
             str(row["id"]),
             row["version_label"],
+            row["language"],
             row["status"],
-            (row["source_hash"] or "")[:16],
-            (row["xml_hash"] or "")[:16],
-            ai,
-            row["validation_status"] or "",
-            str(row["parent_version_id"])
-            if row["parent_version_id"] is not None
+            (row["canonical_hash"] or "")[:16],
+            str(row["parent_expression_id"])
+            if row["parent_expression_id"] is not None
             else "",
             row["processed_at"] or "",
         )
     console.print(table)
 
 
-@query_group.command("sections", help="List sections of a version.")
-@click.argument("version_id", type=int)
+@query_group.command("nodes", help="List nodes of an expression.")
+@click.argument("expression_id", type=int)
 @click.option("--limit", default=200, show_default=True)
 @click.pass_context
-def query_sections(ctx: click.Context, version_id: int, limit: int) -> None:
+def query_nodes(ctx: click.Context, expression_id: int, limit: int) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        rows = db.list_sections(conn, version_id)[:limit]
-    table = Table(title=f"Sections of version {version_id}")
+        rows = db.list_nodes(conn, expression_id)[:limit]
+    table = Table(title=f"Nodes of expression {expression_id}")
     table.add_column("id", justify="right")
-    table.add_column("level")
+    table.add_column("type")
     table.add_column("num")
     table.add_column("heading")
-    table.add_column("identifier")
+    table.add_column("eId")
     for row in rows:
         table.add_row(
             str(row["id"]),
-            row["level"],
+            row["node_type"],
             row["num"] or "",
             (row["heading"] or "")[:80],
-            row["identifier"] or "",
+            row["node_eid"],
         )
     console.print(table)
 
 
-@query_group.command("section", help="Show a single section's full content.")
-@click.argument("section_id", type=int)
-@click.option(
-    "--xml", "show_xml", is_flag=True, help="Print the XML fragment instead of text."
-)
+@query_group.command("node", help="Show one node.")
+@click.argument("node_id", type=int)
+@click.option("--xml", "show_xml", is_flag=True)
 @click.pass_context
-def query_section(ctx: click.Context, section_id: int, show_xml: bool) -> None:
+def query_node(ctx: click.Context, node_id: int, show_xml: bool) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        row = conn.execute(
-            "SELECT * FROM sections WHERE id = ?", (section_id,)
-        ).fetchone()
-    if not row:
-        raise click.ClickException(f"section {section_id} not found")
+        row = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+    if row is None:
+        raise click.ClickException(f"node {node_id} not found")
     console.print(
-        f"[bold]{row['level']}[/bold] {row['num'] or ''} {row['heading'] or ''}"
+        f"[bold]{row['node_type']}[/bold] {row['num'] or ''} {row['heading'] or ''}"
     )
-    if row["identifier"]:
-        console.print(f"[dim]identifier:[/dim] {row['identifier']}")
-    console.print()
-    console.print(row["xml_fragment"] if show_xml else (row["content"] or ""))
+    console.print(f"[dim]eId:[/dim] {row['node_eid']}\n")
+    console.print(row["xml_fragment"] if show_xml else (row["text"] or ""))
 
 
-@query_group.command(
-    "search",
-    help=(
-        "Full-text search across sections (FTS5). "
-        "Pass --raw to use native FTS5 query syntax (e.g. 'tax AND income*')."
-    ),
-)
+@query_group.command("search", help="Full-text search across nodes.")
 @click.argument("text")
-@click.option("--code-id", default=None)
+@click.option("--work-id", default=None)
 @click.option("--limit", default=50, show_default=True)
-@click.option(
-    "--raw",
-    is_flag=True,
-    default=False,
-    help="Forward TEXT as raw FTS5 query syntax instead of treating it as a phrase.",
-)
+@click.option("--raw", is_flag=True)
 @click.pass_context
 def query_search(
-    ctx: click.Context, text: str, code_id: str | None, limit: int, raw: bool
+    ctx: click.Context, text: str, work_id: str | None, limit: int, raw: bool
 ) -> None:
     with db.connect(_db_path(ctx)) as conn:
         try:
-            rows = db.search_sections(conn, text, code_id=code_id, limit=limit, raw=raw)
+            rows = db.search_nodes(conn, text, work_id=work_id, limit=limit, raw=raw)
         except sqlite3.OperationalError as exc:
             raise click.ClickException(f"FTS query error: {exc}") from exc
     table = Table(title=f"Search: {text!r}")
-    table.add_column("section id", justify="right")
-    table.add_column("code")
+    table.add_column("node id", justify="right")
+    table.add_column("work")
     table.add_column("version")
-    table.add_column("level")
+    table.add_column("type")
     table.add_column("heading")
     for row in rows:
         table.add_row(
             str(row["id"]),
-            row["code_id"],
+            row["work_id"],
             row["version_label"],
-            row["level"],
+            row["node_type"],
             (row["heading"] or "")[:80],
         )
     console.print(table)
 
 
-@query_group.command("log", help="Show recent processing log entries.")
-@click.option("--code-id", default=None)
-@click.option("--version-id", type=int, default=None)
-@click.option("--limit", default=50, show_default=True)
+@query_group.command("akn", help="Dump the stored Akoma Ntoso XML for an expression.")
+@click.argument("expression_id", type=int)
 @click.pass_context
-def query_log(
-    ctx: click.Context,
-    code_id: str | None,
-    version_id: int | None,
-    limit: int,
-) -> None:
+def query_akn(ctx: click.Context, expression_id: int) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        rows = db.list_processing_log(
-            conn, code_id=code_id, version_id=version_id, limit=limit
+        row = db.get_expression(conn, expression_id)
+    if row is None:
+        raise click.ClickException(f"expression {expression_id} not found")
+    if not row["canonical_xml"]:
+        raise click.ClickException(
+            f"no canonical XML stored for expression {expression_id}"
         )
-    table = Table(title="Processing log")
-    table.add_column("when")
-    table.add_column("code")
-    table.add_column("version", justify="right")
-    table.add_column("step")
-    table.add_column("status")
-    table.add_column("message")
-    for row in rows:
-        table.add_row(
-            row["created_at"],
-            row["code_id"] or "",
-            str(row["version_id"]) if row["version_id"] is not None else "",
-            row["step"],
-            row["status"],
-            (row["message"] or "")[:60],
-        )
-    console.print(table)
+    click.echo(row["canonical_xml"])
 
 
-@query_group.command("xml", help="Dump the stored USLM XML for a version.")
-@click.argument("version_id", type=int)
+@query_group.command("revisions", help="List revisions of a work.")
+@click.argument("work_id")
 @click.pass_context
-def query_xml(ctx: click.Context, version_id: int) -> None:
+def query_revisions(ctx: click.Context, work_id: str) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        row = db.get_version(conn, version_id)
-    if not row:
-        raise click.ClickException(f"version {version_id} not found")
-    if not row["xml_content"]:
-        raise click.ClickException(f"no XML stored for version {version_id}")
-    click.echo(row["xml_content"])
-
-
-@query_group.command("revisions", help="List version-to-version revisions of a code.")
-@click.argument("code_id")
-@click.pass_context
-def query_revisions(ctx: click.Context, code_id: str) -> None:
-    with db.connect(_db_path(ctx)) as conn:
-        rows = db.list_revisions(conn, code_id)
-    table = Table(title=f"Revisions of {code_id}")
+        rows = db.list_revisions(conn, work_id)
+    table = Table(title=f"Revisions of {work_id}")
     table.add_column("rev id", justify="right")
     table.add_column("from")
     table.add_column("to")
@@ -438,324 +406,281 @@ def query_revisions(ctx: click.Context, code_id: str) -> None:
     table.add_column("-", justify="right")
     table.add_column("~", justify="right")
     table.add_column("=", justify="right")
-    table.add_column("created")
     for row in rows:
         table.add_row(
             str(row["id"]),
             row["from_label"] or "(initial)",
             row["to_label"],
-            str(row["sections_added"]),
-            str(row["sections_removed"]),
-            str(row["sections_modified"]),
-            str(row["sections_unchanged"]),
-            row["created_at"],
+            str(row["nodes_added"]),
+            str(row["nodes_removed"]),
+            str(row["nodes_modified"]),
+            str(row["nodes_unchanged"]),
         )
     console.print(table)
 
 
-@query_group.command(
-    "revision", help="Show the section-level changes inside a revision."
-)
+@query_group.command("revision", help="Show node changes inside a revision.")
 @click.argument("revision_id", type=int)
 @click.option(
     "--type",
     "change_type",
     type=click.Choice(["added", "removed", "modified"]),
     default=None,
-    help="Filter by change type.",
 )
-@click.option("--limit", default=200, show_default=True)
 @click.pass_context
 def query_revision(
-    ctx: click.Context,
-    revision_id: int,
-    change_type: str | None,
-    limit: int,
+    ctx: click.Context, revision_id: int, change_type: str | None
 ) -> None:
     with db.connect(_db_path(ctx)) as conn:
         revision = db.get_revision(conn, revision_id)
-        if not revision:
+        if revision is None:
             raise click.ClickException(f"revision {revision_id} not found")
-        rows = db.list_section_changes(conn, revision_id, change_type=change_type)[
-            :limit
-        ]
-    console.print(
-        f"[bold]Revision {revision_id}[/bold] "
-        f"{revision['from_label'] or '(initial)'} → {revision['to_label']}  "
-        f"[green]+{revision['sections_added']}[/green] "
-        f"[red]-{revision['sections_removed']}[/red] "
-        f"[yellow]~{revision['sections_modified']}[/yellow] "
-        f"={revision['sections_unchanged']}"
-    )
-    table = Table()
+        rows = db.list_node_changes(conn, revision_id, change_type=change_type)
+    table = Table(title=f"Revision {revision_id}")
     table.add_column("change id", justify="right")
     table.add_column("type")
-    table.add_column("level")
+    table.add_column("node")
     table.add_column("num")
-    table.add_column("identifier")
+    table.add_column("eId")
     table.add_column("heading")
     for row in rows:
-        color = {"added": "green", "removed": "red", "modified": "yellow"}[
-            row["change_type"]
-        ]
         table.add_row(
             str(row["id"]),
-            f"[{color}]{row['change_type']}[/{color}]",
-            row["level"] or "",
+            row["change_type"],
+            row["node_type"] or "",
             row["num"] or "",
-            row["identifier"] or "",
+            row["node_eid"] or "",
             (row["heading"] or "")[:60],
         )
     console.print(table)
 
 
-@query_group.command(
-    "diff", help="Show the unified text diff for a single section change."
-)
+@query_group.command("diff", help="Show the text diff for a single node change.")
 @click.argument("change_id", type=int)
 @click.pass_context
 def query_diff(ctx: click.Context, change_id: int) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        row = db.get_section_change(conn, change_id)
-    if not row:
-        raise click.ClickException(f"section change {change_id} not found")
-    if not row["text_diff"]:
-        console.print(
-            f"[dim]No text diff stored for change {change_id} "
-            f"(type={row['change_type']}).[/dim]"
-        )
-        return
-    click.echo(row["text_diff"])
-
-
-def _resolve_version(conn: sqlite3.Connection, code_id: str, label: str) -> "object":
-    row = db.find_version_by_label(conn, code_id, label)
+        row = db.get_node_change(conn, change_id)
     if row is None:
-        raise click.ClickException(f"version {label!r} of {code_id!r} not found")
-    return row
+        raise click.ClickException(f"node change {change_id} not found")
+    click.echo(row["text_diff"] or "")
 
 
-@query_group.command(
-    "diff-versions",
-    help="Diff any two versions of a code (need not be adjacent).",
-)
-@click.argument("code_id")
-@click.option("--from", "from_label", required=True, help="Earlier version label.")
-@click.option("--to", "to_label", required=True, help="Later version label.")
-@click.option(
-    "--identifier",
-    default=None,
-    help="Restrict the diff to a single USLM identifier.",
-)
-@click.option(
-    "--unified",
-    is_flag=True,
-    help="Print full unified diffs (one per modified section) instead of a table.",
-)
+@query_group.command("diff-expressions", help="Diff any two expressions.")
+@click.argument("work_id")
+@click.option("--from", "from_label", required=True)
+@click.option("--to", "to_label", required=True)
+@click.option("--language", default="zho", show_default=True)
+@click.option("--node-eid", default=None)
+@click.option("--json-output", is_flag=True)
 @click.pass_context
-def query_diff_versions(
+def query_diff_expressions(
     ctx: click.Context,
-    code_id: str,
+    work_id: str,
     from_label: str,
     to_label: str,
-    identifier: str | None,
-    unified: bool,
+    language: str,
+    node_eid: str | None,
+    json_output: bool,
 ) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        from_v = _resolve_version(conn, code_id, from_label)
-        to_v = _resolve_version(conn, code_id, to_label)
-        changes, stats = db.diff_versions(
+        from_expr = _resolve_expression(conn, work_id, from_label, language)
+        to_expr = _resolve_expression(conn, work_id, to_label, language)
+        changes, stats = db.diff_expressions(
             conn,
-            code_id=code_id,
-            from_version_id=int(from_v["id"]),
-            to_version_id=int(to_v["id"]),
-            identifier=identifier,
+            work_id=work_id,
+            from_expression_id=int(from_expr["id"]),
+            to_expression_id=int(to_expr["id"]),
+            node_eid=node_eid,
         )
-    console.print(
-        f"[bold]{code_id}[/bold] {from_label} → {to_label}  "
-        f"[green]+{stats.added}[/green] "
-        f"[red]-{stats.removed}[/red] "
-        f"[yellow]~{stats.modified}[/yellow] "
-        f"={stats.unchanged}"
-    )
-    if unified:
-        for change in changes:
-            color = {
-                "added": "green",
-                "removed": "red",
-                "modified": "yellow",
-            }[change.change_type]
-            console.print(
-                f"\n[{color}]{change.change_type}[/{color}] "
-                f"{change.level} {change.num or ''} "
-                f"{change.identifier or '(anonymous)'} — "
-                f"{(change.heading or '')[:80]}"
-            )
-            if change.text_diff:
-                click.echo(change.text_diff)
+    if json_output:
+        click.echo(
+            json.dumps([c.__dict__ for c in changes], ensure_ascii=False, indent=2)
+        )
         return
+    console.print(
+        f"[bold]{work_id}[/bold] {from_label} → {to_label} +{stats.added} -{stats.removed} ~{stats.modified} ={stats.unchanged}"
+    )
     table = Table()
     table.add_column("type")
-    table.add_column("level")
+    table.add_column("node")
     table.add_column("num")
-    table.add_column("identifier")
+    table.add_column("eId")
     table.add_column("heading")
     for change in changes:
-        color = {"added": "green", "removed": "red", "modified": "yellow"}[
-            change.change_type
-        ]
         table.add_row(
-            f"[{color}]{change.change_type}[/{color}]",
-            change.level or "",
+            change.change_type,
+            change.node_type,
             change.num or "",
-            change.identifier or "",
+            change.node_eid or "",
             (change.heading or "")[:60],
         )
     console.print(table)
 
 
-@query_group.command(
-    "blame",
-    help=(
-        "Show line-by-line provenance for a section identifier. "
-        "Each line is annotated with the version that first introduced it."
-    ),
-)
-@click.argument("code_id")
-@click.argument("identifier")
-@click.option(
-    "--version",
-    "version_label",
-    default=None,
-    help="Version label to blame at (defaults to the latest imported version).",
-)
+@query_group.command("blame", help="Show line provenance for a node eId.")
+@click.argument("work_id")
+@click.argument("node_eid")
+@click.option("--version", "version_label", default=None)
+@click.option("--language", default="zho", show_default=True)
 @click.pass_context
 def query_blame(
     ctx: click.Context,
-    code_id: str,
-    identifier: str,
+    work_id: str,
+    node_eid: str,
     version_label: str | None,
+    language: str,
 ) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        if version_label:
-            version_row = _resolve_version(conn, code_id, version_label)
-        else:
-            version_row = db.latest_version(conn, code_id)
-            if version_row is None:
-                raise click.ClickException(f"no imported version of {code_id!r} found")
-        section = db.find_section_by_identifier(
-            conn, int(version_row["id"]), identifier
+        expr = (
+            _resolve_expression(conn, work_id, version_label, language)
+            if version_label
+            else db.latest_expression(conn, work_id, language)
         )
-        if section is None:
-            raise click.ClickException(
-                f"identifier {identifier!r} not found in "
-                f"{code_id}@{version_row['version_label']}"
-            )
-        lines = db.get_section_lines(conn, int(section["id"]))
-    console.print(
-        f"[bold]{identifier}[/bold] @ {code_id}/{version_row['version_label']}  "
-        f"({section['level']} {section['num'] or ''}: "
-        f"{(section['heading'] or '')[:60]})"
-    )
-    table = Table()
+        if expr is None:
+            raise click.ClickException(f"no imported expression of {work_id!r} found")
+        node = db.find_node_by_eid(conn, int(expr["id"]), node_eid)
+        if node is None:
+            raise click.ClickException(f"node {node_eid!r} not found")
+        lines = db.get_node_lines(conn, int(node["id"]))
+    table = Table(title=f"{node_eid} @ {work_id}/{expr['version_label']}")
     table.add_column("line", justify="right")
     table.add_column("origin")
     table.add_column("text")
     for row in lines:
-        table.add_row(
-            str(row["line_no"]),
-            row["origin_version_label"],
-            row["text"],
-        )
+        table.add_row(str(row["line_no"]), row["origin_version_label"], row["text"])
     console.print(table)
 
 
-@query_group.command(
-    "history",
-    help="List every revision that touched a given USLM identifier.",
-)
-@click.argument("code_id")
-@click.argument("identifier")
+@query_group.command("history", help="List every revision that touched a node eId.")
+@click.argument("work_id")
+@click.argument("node_eid")
 @click.pass_context
-def query_history(ctx: click.Context, code_id: str, identifier: str) -> None:
+def query_history(ctx: click.Context, work_id: str, node_eid: str) -> None:
     with db.connect(_db_path(ctx)) as conn:
-        rows = db.section_history(conn, code_id, identifier)
-    table = Table(title=f"History of {identifier} in {code_id}")
+        rows = db.node_history(conn, work_id, node_eid)
+    table = Table(title=f"History of {node_eid} in {work_id}")
     table.add_column("rev id", justify="right")
     table.add_column("from")
     table.add_column("to")
     table.add_column("type")
     table.add_column("change id", justify="right")
-    table.add_column("heading")
     for row in rows:
-        color = {"added": "green", "removed": "red", "modified": "yellow"}[
-            row["change_type"]
-        ]
         table.add_row(
             str(row["revision_id"]),
             row["from_label"] or "(initial)",
             row["to_label"],
-            f"[{color}]{row['change_type']}[/{color}]",
+            row["change_type"],
             str(row["change_id"]),
-            (row["heading"] or "")[:60],
         )
     console.print(table)
-    if not rows:
-        console.print(
-            f"[dim]No recorded changes for {identifier!r} in {code_id!r}.[/dim]"
+
+
+@query_group.command("log", help="Show recent processing log entries.")
+@click.option("--work-id", default=None)
+@click.option("--expression-id", type=int, default=None)
+@click.option("--limit", default=50, show_default=True)
+@click.pass_context
+def query_log(
+    ctx: click.Context, work_id: str | None, expression_id: int | None, limit: int
+) -> None:
+    with db.connect(_db_path(ctx)) as conn:
+        rows = db.list_processing_log(
+            conn, work_id=work_id, expression_id=expression_id, limit=limit
         )
+    table = Table(title="Processing log")
+    table.add_column("when")
+    table.add_column("work")
+    table.add_column("expr", justify="right")
+    table.add_column("step")
+    table.add_column("status")
+    table.add_column("message")
+    for row in rows:
+        table.add_row(
+            row["created_at"],
+            row["work_id"] or "",
+            str(row["expression_id"] or ""),
+            row["step"],
+            row["status"],
+            (row["message"] or "")[:60],
+        )
+    console.print(table)
+
+
+@main.command("serve", help="Run a read-only web UI for browsing the database.")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8000, show_default=True, type=int)
+@click.option("--open", "open_browser", is_flag=True)
+@click.pass_context
+def serve_cmd(ctx: click.Context, host: str, port: int, open_browser: bool) -> None:
+    from .web import serve
+
+    serve(_db_path(ctx), host=host, port=port, open_browser=open_browser)
+
+
+def _resolve_expression(
+    conn: sqlite3.Connection, work_id: str, label: str | None, language: str
+) -> sqlite3.Row:
+    if label is None:
+        row = db.latest_expression(conn, work_id, language)
+    else:
+        row = db.find_expression_by_label(conn, work_id, label, language)
+    if row is None:
+        raise click.ClickException(f"expression {label!r} of {work_id!r} not found")
+    return row
 
 
 def _print_progress(phase: str, result: ProcessResult) -> None:
     doc = result.document
     if phase == "start":
         console.print(
-            f"[cyan]→[/cyan] {doc.code_id}/{doc.version_label}/{doc.path.name}"
+            f"[cyan]→[/cyan] {doc.work_id}/{doc.version_label}/{doc.path.name}"
         )
         return
-    color = {
-        "imported": "green",
-        "skipped": "yellow",
-        "failed": "red",
-    }.get(result.status, "white")
+    color = {"imported": "green", "skipped": "yellow", "failed": "red"}.get(
+        result.status, "white"
+    )
     if result.status == "imported":
-        extra = f" sections={result.sections}"
+        extra = f" nodes={result.nodes}"
         if result.revision is not None:
             r = result.revision
             extra += f" rev=+{r.added}/-{r.removed}/~{r.modified}/={r.unchanged}"
     else:
         extra = f" {result.message or ''}"
     console.print(
-        f"  [{color}]{result.status}[/{color}] {doc.code_id}/{doc.version_label}{extra}"
+        f"  [{color}]{result.status}[/{color}] {doc.work_id}/{doc.version_label}{extra}"
     )
 
 
 def _summarize(results: list[ProcessResult]) -> None:
     counts: dict[str, int] = {}
-    for r in results:
-        counts[r.status] = counts.get(r.status, 0) + 1
-    summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no documents"
-    console.print(f"\n[bold]Summary:[/bold] {summary}")
-    failed = [r for r in results if r.status == "failed"]
+    for result in results:
+        counts[result.status] = counts.get(result.status, 0) + 1
+    console.print(
+        "\n[bold]Summary:[/bold] "
+        + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no documents")
+    )
+    failed = [result for result in results if result.status == "failed"]
     if failed:
         console.print("[red]Failures:[/red]")
-        for r in failed:
-            console.print(f"  - {r.document.relative_key}: {r.message}")
+        for result in failed:
+            console.print(f"  - {result.document.relative_key}: {result.message}")
     if os.environ.get("UCDB_JSON"):
         click.echo(
             json.dumps(
                 [
                     {
-                        "code_id": r.document.code_id,
+                        "work_id": r.document.work_id,
                         "version": r.document.version_label,
                         "path": str(r.document.path),
                         "status": r.status,
-                        "version_id": r.version_id,
-                        "sections": r.sections,
+                        "expression_id": r.expression_id,
+                        "nodes": r.nodes,
                         "message": r.message,
                     }
                     for r in results
                 ],
+                ensure_ascii=False,
                 indent=2,
             )
         )

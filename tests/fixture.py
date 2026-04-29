@@ -1,7 +1,7 @@
 """Synthetic legal-code fixture used by the diff/blame test suite.
 
 We construct a fictional ``tax-code`` with ten sections (~100 lines total at
-v1) and emit ten successive USLM XML snapshots that exercise every kind of
+v1) and emit ten successive Akoma Ntoso XML snapshots that exercise every kind of
 edit the pipeline must track:
 
 * Pure additions of brand-new sections.
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Section:
-    identifier: str
+    eid: str
     num: str
     heading: str
     lines: list[str] = field(default_factory=list)
@@ -33,7 +33,7 @@ class Section:
 # v1 — initial 10 sections, ~100 content lines.
 V1: list[Section] = [
     Section(
-        "/tax-code/s1",
+        "art_1",
         "1",
         "Definitions",
         [
@@ -50,7 +50,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s2",
+        "art_2",
         "2",
         "Filing Requirements",
         [
@@ -67,7 +67,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s3",
+        "art_3",
         "3",
         "Tax Rates",
         [
@@ -84,7 +84,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s4",
+        "art_4",
         "4",
         "Deductions",
         [
@@ -101,7 +101,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s5",
+        "art_5",
         "5",
         "Credits",
         [
@@ -118,7 +118,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s6",
+        "art_6",
         "6",
         "Penalties",
         [
@@ -135,7 +135,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s7",
+        "art_7",
         "7",
         "Audits",
         [
@@ -152,7 +152,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s8",
+        "art_8",
         "8",
         "Appeals",
         [
@@ -169,7 +169,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s9",
+        "art_9",
         "9",
         "Refunds",
         [
@@ -186,7 +186,7 @@ V1: list[Section] = [
         ],
     ),
     Section(
-        "/tax-code/s10",
+        "art_10",
         "10",
         "Records Retention",
         [
@@ -229,7 +229,7 @@ def build_versions() -> list[tuple[str, list[Section]]]:
     )
     s.append(
         Section(
-            "/tax-code/s11",
+            "art_11",
             "11",
             "Privacy of Returns",
             [
@@ -259,12 +259,12 @@ def build_versions() -> list[tuple[str, list[Section]]]:
 
     # v4 — repeal the credits section entirely.
     s = _clone(versions[-1][1])
-    s = [sec for sec in s if sec.identifier != "/tax-code/s5"]
+    s = [sec for sec in s if sec.eid != "art_5"]
     versions.append(("2021-07-01", s))
 
     # v5 — modernize filing (s2) and tighten the SALT cap (s4).
     s = _clone(versions[-1][1])
-    s2 = next(sec for sec in s if sec.identifier == "/tax-code/s2")
+    s2 = next(sec for sec in s if sec.eid == "art_2")
     _replace_line(
         s2,
         1,
@@ -280,7 +280,7 @@ def build_versions() -> list[tuple[str, list[Section]]]:
         8,
         "Amended returns may be filed within four years of the original deadline.",
     )
-    s4 = next(sec for sec in s if sec.identifier == "/tax-code/s4")
+    s4 = next(sec for sec in s if sec.eid == "art_4")
     _replace_line(
         s4, 3, "State and local taxes are deductible up to five thousand per return."
     )
@@ -290,7 +290,7 @@ def build_versions() -> list[tuple[str, list[Section]]]:
     s = _clone(versions[-1][1])
     s.append(
         Section(
-            "/tax-code/s12",
+            "art_12",
             "12",
             "International Transactions",
             [
@@ -302,7 +302,7 @@ def build_versions() -> list[tuple[str, list[Section]]]:
             ],
         )
     )
-    s7 = next(sec for sec in s if sec.identifier == "/tax-code/s7")
+    s7 = next(sec for sec in s if sec.eid == "art_7")
     _replace_line(
         s7, 3, "Taxpayers must produce records within thirty days of a written request."
     )
@@ -313,7 +313,7 @@ def build_versions() -> list[tuple[str, list[Section]]]:
     s.insert(
         4,
         Section(
-            "/tax-code/s5",
+            "art_5",
             "5",
             "Credits",
             [
@@ -326,7 +326,7 @@ def build_versions() -> list[tuple[str, list[Section]]]:
             ],
         ),
     )
-    s11 = next(sec for sec in s if sec.identifier == "/tax-code/s11")
+    s11 = next(sec for sec in s if sec.eid == "art_11")
     _replace_line(
         s11,
         2,
@@ -336,21 +336,21 @@ def build_versions() -> list[tuple[str, list[Section]]]:
 
     # v8 — expand definitions; trim retention.
     s = _clone(versions[-1][1])
-    s1 = next(sec for sec in s if sec.identifier == "/tax-code/s1")
+    s1 = next(sec for sec in s if sec.eid == "art_1")
     s1.lines.extend(
         [
             "Digital asset means a cryptographically secured representation of value.",
             "Pass-through entity means a partnership, S corporation, or similar arrangement.",
         ]
     )
-    s10 = next(sec for sec in s if sec.identifier == "/tax-code/s10")
+    s10 = next(sec for sec in s if sec.eid == "art_10")
     s10.lines = s10.lines[:7]
     versions.append(("2023-07-01", s))
 
     # v9 — repeal international section; tighten appeal procedure.
     s = _clone(versions[-1][1])
-    s = [sec for sec in s if sec.identifier != "/tax-code/s12"]
-    s8 = next(sec for sec in s if sec.identifier == "/tax-code/s8")
+    s = [sec for sec in s if sec.eid != "art_12"]
+    s8 = next(sec for sec in s if sec.eid == "art_8")
     _replace_line(
         s8, 4, "Filing an appeal automatically stays collection for sixty days."
     )
@@ -358,15 +358,15 @@ def build_versions() -> list[tuple[str, list[Section]]]:
 
     # v10 — return the standard rate to 25%; small wording fix in s6 and s9.
     s = _clone(versions[-1][1])
-    s3 = next(sec for sec in s if sec.identifier == "/tax-code/s3")
+    s3 = next(sec for sec in s if sec.eid == "art_3")
     _replace_line(
         s3, 0, "The standard rate of tax is twenty-five percent of taxable income."
     )
-    s6 = next(sec for sec in s if sec.identifier == "/tax-code/s6")
+    s6 = next(sec for sec in s if sec.eid == "art_6")
     _replace_line(
         s6, 6, "Penalties may be abated for reasonable cause as defined by regulation."
     )
-    s9 = next(sec for sec in s if sec.identifier == "/tax-code/s9")
+    s9 = next(sec for sec in s if sec.eid == "art_9")
     _replace_line(
         s9,
         4,
@@ -378,34 +378,60 @@ def build_versions() -> list[tuple[str, list[Section]]]:
     return versions
 
 
-def to_uslm_xml(version_label: str, sections: list[Section]) -> str:
-    """Render a list of sections into a minimal-but-valid USLM XML document."""
+def to_akn_xml(version_label: str, sections: list[Section]) -> str:
+    """Render a list of sections into a minimal-but-valid Akoma Ntoso XML document."""
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<uslm xmlns="http://schemas.gpo.gov/xml/uslm" '
-        'xmlns:dc="http://purl.org/dc/elements/1.1/">',
-        "  <meta>",
-        "    <dc:title>Made-Up Tax Code</dc:title>",
-        "    <dc:type>code</dc:type>",
-        f"    <dc:identifier>/tax-code/{version_label}</dc:identifier>",
-        "  </meta>",
-        "  <main>",
-        '    <title identifier="/tax-code">',
-        "      <num>I</num>",
-        "      <heading>Tax Code</heading>",
+        '<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">',
+        '  <act name="law" contains="originalVersion" ucdbProfile="tw-legaldocml@0.2">',
+        "    <meta>",
+        '      <identification source="#ucdb">',
+        "        <FRBRWork>",
+        '          <FRBRthis value="/akn/tw/act/law/tax-code/!main"/>',
+        '          <FRBRuri value="/akn/tw/act/law/tax-code"/>',
+        f'          <FRBRdate date="{version_label}" name="Made-Up Tax Code"/>',
+        '          <FRBRauthor href="#source" as="#author"/>',
+        '          <FRBRcountry value="tw"/>',
+        '          <FRBRsubtype value="law"/>',
+        '          <FRBRname value="Made-Up Tax Code"/>',
+        "        </FRBRWork>",
+        "        <FRBRExpression>",
+        f'          <FRBRthis value="/akn/tw/act/law/tax-code/zho@{version_label}/!main"/>',
+        f'          <FRBRuri value="/akn/tw/act/law/tax-code/zho@{version_label}"/>',
+        f'          <FRBRdate date="{version_label}" name="{version_label}"/>',
+        '          <FRBRauthor href="#ucdb" as="#editor"/>',
+        '          <FRBRlanguage language="zho"/>',
+        "        </FRBRExpression>",
+        "        <FRBRManifestation>",
+        f'          <FRBRthis value="/akn/tw/act/law/tax-code/zho@{version_label}/!main.xml"/>',
+        f'          <FRBRuri value="/akn/tw/act/law/tax-code/zho@{version_label}.akn"/>',
+        f'          <FRBRdate date="{version_label}" name="UCDB Akoma Ntoso XML"/>',
+        '          <FRBRauthor href="#ucdb" as="#generator"/>',
+        "        </FRBRManifestation>",
+        "      </identification>",
+        '      <references source="#ucdb">',
+        '        <TLCOrganization eId="ucdb" href="/akn/tw/ontology/organization/ucdb" showAs="Universal Code Database"/>',
+        '        <TLCOrganization eId="source" href="/akn/tw/source/test" showAs="Fixture"/>',
+        "      </references>",
+        "    </meta>",
+        "    <body>",
+        '      <part eId="part_1">',
+        "        <num>I</num>",
+        "        <heading>Tax Code</heading>",
     ]
     for sec in sections:
-        parts.append(f'      <section identifier="{sec.identifier}">')
-        parts.append(f"        <num>{sec.num}</num>")
-        parts.append(f"        <heading>{_xml_escape(sec.heading)}</heading>")
-        parts.append("        <content>")
+        parts.append(f'        <article eId="{sec.eid}">')
+        parts.append(f"          <num>{sec.num}</num>")
+        parts.append(f"          <heading>{_xml_escape(sec.heading)}</heading>")
+        parts.append("          <content>")
         for line in sec.lines:
-            parts.append(f"          <p>{_xml_escape(line)}</p>")
-        parts.append("        </content>")
-        parts.append("      </section>")
-    parts.append("    </title>")
-    parts.append("  </main>")
-    parts.append("</uslm>")
+            parts.append(f"            <p>{_xml_escape(line)}</p>")
+        parts.append("          </content>")
+        parts.append("        </article>")
+    parts.append("      </part>")
+    parts.append("    </body>")
+    parts.append("  </act>")
+    parts.append("</akomaNtoso>")
     return "\n".join(parts)
 
 

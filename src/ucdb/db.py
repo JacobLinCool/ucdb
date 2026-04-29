@@ -1,4 +1,4 @@
-"""SQLite schema and core data access layer."""
+"""SQLite schema and data access for UCDB 0.2."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -17,280 +17,250 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS codes (
+CREATE TABLE IF NOT EXISTS works (
     id TEXT PRIMARY KEY,
+    jurisdiction TEXT NOT NULL,
+    document_class TEXT NOT NULL,
     title TEXT,
-    description TEXT,
+    source_authority TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS document_versions (
+CREATE TABLE IF NOT EXISTS expressions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code_id TEXT NOT NULL,
+    work_id TEXT NOT NULL,
     version_label TEXT NOT NULL,
+    language TEXT NOT NULL,
+    expression_date TEXT,
     effective_date TEXT,
-    source_path TEXT NOT NULL,
+    promulgation_date TEXT,
+    enforcement_date TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    source_path TEXT,
+    source_url TEXT,
     source_hash TEXT NOT NULL,
     source_size INTEGER,
     source_mime TEXT,
-    xml_content TEXT,
-    xml_hash TEXT,
+    canonical_format TEXT NOT NULL DEFAULT 'akn+xml',
+    canonical_xml TEXT,
+    canonical_hash TEXT,
+    akn_profile TEXT NOT NULL,
+    validation_status TEXT,
+    validation_message TEXT,
+    parent_expression_id INTEGER,
     ai_provider TEXT,
     ai_model TEXT,
     ai_base_url TEXT,
-    validation_status TEXT,
-    validation_message TEXT,
-    parent_version_id INTEGER,
-    status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     processed_at TEXT,
-    UNIQUE(code_id, version_label),
-    UNIQUE(code_id, source_hash),
-    FOREIGN KEY(code_id) REFERENCES codes(id) ON DELETE CASCADE,
-    FOREIGN KEY(parent_version_id) REFERENCES document_versions(id) ON DELETE SET NULL
+    UNIQUE(work_id, version_label, language),
+    UNIQUE(work_id, source_hash, language),
+    FOREIGN KEY(work_id) REFERENCES works(id) ON DELETE CASCADE,
+    FOREIGN KEY(parent_expression_id) REFERENCES expressions(id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_versions_code ON document_versions(code_id);
-CREATE INDEX IF NOT EXISTS idx_versions_status ON document_versions(status);
-CREATE INDEX IF NOT EXISTS idx_versions_parent ON document_versions(parent_version_id);
+CREATE INDEX IF NOT EXISTS idx_expressions_work ON expressions(work_id);
+CREATE INDEX IF NOT EXISTS idx_expressions_status ON expressions(status);
+CREATE INDEX IF NOT EXISTS idx_expressions_parent ON expressions(parent_expression_id);
 
-CREATE TABLE IF NOT EXISTS sections (
+CREATE TABLE IF NOT EXISTS nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    version_id INTEGER NOT NULL,
+    expression_id INTEGER NOT NULL,
     parent_id INTEGER,
-    level TEXT NOT NULL,
-    identifier TEXT,
+    node_eid TEXT NOT NULL,
+    node_type TEXT NOT NULL,
+    profile_type TEXT,
     num TEXT,
     heading TEXT,
-    content TEXT,
-    xml_fragment TEXT,
+    text TEXT,
+    xml_fragment TEXT NOT NULL,
+    text_hash TEXT,
+    normalized_text_hash TEXT,
     ordering INTEGER NOT NULL,
-    FOREIGN KEY(version_id) REFERENCES document_versions(id) ON DELETE CASCADE,
-    FOREIGN KEY(parent_id) REFERENCES sections(id) ON DELETE CASCADE
+    depth INTEGER NOT NULL,
+    source_locator TEXT,
+    UNIQUE(expression_id, node_eid),
+    FOREIGN KEY(expression_id) REFERENCES expressions(id) ON DELETE CASCADE,
+    FOREIGN KEY(parent_id) REFERENCES nodes(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_sections_version ON sections(version_id);
-CREATE INDEX IF NOT EXISTS idx_sections_parent ON sections(parent_id);
-CREATE INDEX IF NOT EXISTS idx_sections_level ON sections(level);
-CREATE INDEX IF NOT EXISTS idx_sections_identifier ON sections(identifier);
+CREATE INDEX IF NOT EXISTS idx_nodes_expression ON nodes(expression_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
+CREATE INDEX IF NOT EXISTS idx_nodes_eid ON nodes(node_eid);
+
+CREATE TABLE IF NOT EXISTS node_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id INTEGER NOT NULL,
+    block_eid TEXT,
+    block_type TEXT NOT NULL,
+    text TEXT,
+    xml_fragment TEXT NOT NULL,
+    ordering INTEGER NOT NULL,
+    text_hash TEXT,
+    normalized_text_hash TEXT,
+    FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_node_blocks_node ON node_blocks(node_id);
 
 CREATE TABLE IF NOT EXISTS processing_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code_id TEXT,
-    version_id INTEGER,
+    work_id TEXT,
+    expression_id INTEGER,
     step TEXT NOT NULL,
     status TEXT NOT NULL,
     message TEXT,
     details TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY(version_id) REFERENCES document_versions(id) ON DELETE SET NULL
+    FOREIGN KEY(work_id) REFERENCES works(id) ON DELETE SET NULL,
+    FOREIGN KEY(expression_id) REFERENCES expressions(id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_log_version ON processing_log(version_id);
-CREATE INDEX IF NOT EXISTS idx_log_code ON processing_log(code_id);
+CREATE INDEX IF NOT EXISTS idx_log_work ON processing_log(work_id);
+CREATE INDEX IF NOT EXISTS idx_log_expression ON processing_log(expression_id);
 
--- A revision compares two versions of the same code. `from_version_id` is
--- NULL for the very first version (everything is "added").
 CREATE TABLE IF NOT EXISTS revisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code_id TEXT NOT NULL,
-    from_version_id INTEGER,
-    to_version_id INTEGER NOT NULL,
-    sections_added INTEGER NOT NULL DEFAULT 0,
-    sections_removed INTEGER NOT NULL DEFAULT 0,
-    sections_modified INTEGER NOT NULL DEFAULT 0,
-    sections_unchanged INTEGER NOT NULL DEFAULT 0,
+    work_id TEXT NOT NULL,
+    from_expression_id INTEGER,
+    to_expression_id INTEGER NOT NULL,
+    nodes_added INTEGER NOT NULL DEFAULT 0,
+    nodes_removed INTEGER NOT NULL DEFAULT 0,
+    nodes_modified INTEGER NOT NULL DEFAULT 0,
+    nodes_unchanged INTEGER NOT NULL DEFAULT 0,
     summary TEXT,
     created_at TEXT NOT NULL,
-    UNIQUE(from_version_id, to_version_id),
-    FOREIGN KEY(code_id) REFERENCES codes(id) ON DELETE CASCADE,
-    FOREIGN KEY(from_version_id) REFERENCES document_versions(id) ON DELETE CASCADE,
-    FOREIGN KEY(to_version_id)   REFERENCES document_versions(id) ON DELETE CASCADE
+    UNIQUE(from_expression_id, to_expression_id),
+    FOREIGN KEY(work_id) REFERENCES works(id) ON DELETE CASCADE,
+    FOREIGN KEY(from_expression_id) REFERENCES expressions(id) ON DELETE CASCADE,
+    FOREIGN KEY(to_expression_id) REFERENCES expressions(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_revisions_code ON revisions(code_id);
-CREATE INDEX IF NOT EXISTS idx_revisions_to ON revisions(to_version_id);
+CREATE INDEX IF NOT EXISTS idx_revisions_work ON revisions(work_id);
+CREATE INDEX IF NOT EXISTS idx_revisions_to ON revisions(to_expression_id);
 
-CREATE TABLE IF NOT EXISTS section_changes (
+CREATE TABLE IF NOT EXISTS node_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     revision_id INTEGER NOT NULL,
-    change_type TEXT NOT NULL,         -- added | removed | modified
-    identifier TEXT,
-    level TEXT,
+    change_type TEXT NOT NULL,
+    node_eid TEXT,
+    node_type TEXT,
     num TEXT,
     heading TEXT,
-    from_section_id INTEGER,
-    to_section_id INTEGER,
+    from_node_id INTEGER,
+    to_node_id INTEGER,
     text_diff TEXT,
-    FOREIGN KEY(revision_id)     REFERENCES revisions(id) ON DELETE CASCADE,
-    FOREIGN KEY(from_section_id) REFERENCES sections(id)  ON DELETE SET NULL,
-    FOREIGN KEY(to_section_id)   REFERENCES sections(id)  ON DELETE SET NULL
+    details TEXT,
+    FOREIGN KEY(revision_id) REFERENCES revisions(id) ON DELETE CASCADE,
+    FOREIGN KEY(from_node_id) REFERENCES nodes(id) ON DELETE SET NULL,
+    FOREIGN KEY(to_node_id) REFERENCES nodes(id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_section_changes_rev ON section_changes(revision_id);
-CREATE INDEX IF NOT EXISTS idx_section_changes_type ON section_changes(change_type);
-CREATE INDEX IF NOT EXISTS idx_section_changes_identifier ON section_changes(identifier);
+CREATE INDEX IF NOT EXISTS idx_node_changes_rev ON node_changes(revision_id);
+CREATE INDEX IF NOT EXISTS idx_node_changes_type ON node_changes(change_type);
+CREATE INDEX IF NOT EXISTS idx_node_changes_eid ON node_changes(node_eid);
 
--- Line-level provenance: every line of a section in a particular version is
--- tagged with the version that *first introduced that exact line* for the
--- section's identifier chain. This is the storage backing `ucdb query blame`.
--- Lines are inherited from the predecessor version when they survive an edit,
--- otherwise they are stamped with the current version.
-CREATE TABLE IF NOT EXISTS section_lines (
+CREATE TABLE IF NOT EXISTS node_lines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    section_id INTEGER NOT NULL,
+    node_id INTEGER NOT NULL,
     line_no INTEGER NOT NULL,
     text TEXT NOT NULL,
-    origin_version_id INTEGER NOT NULL,
-    origin_section_id INTEGER,
-    FOREIGN KEY(section_id)        REFERENCES sections(id)          ON DELETE CASCADE,
-    FOREIGN KEY(origin_version_id) REFERENCES document_versions(id) ON DELETE CASCADE,
-    FOREIGN KEY(origin_section_id) REFERENCES sections(id)          ON DELETE SET NULL,
-    UNIQUE(section_id, line_no)
+    origin_expression_id INTEGER NOT NULL,
+    origin_node_id INTEGER,
+    FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+    FOREIGN KEY(origin_expression_id) REFERENCES expressions(id) ON DELETE CASCADE,
+    FOREIGN KEY(origin_node_id) REFERENCES nodes(id) ON DELETE SET NULL,
+    UNIQUE(node_id, line_no)
 );
 
-CREATE INDEX IF NOT EXISTS idx_section_lines_section ON section_lines(section_id);
-CREATE INDEX IF NOT EXISTS idx_section_lines_origin_version ON section_lines(origin_version_id);
+CREATE INDEX IF NOT EXISTS idx_node_lines_node ON node_lines(node_id);
+CREATE INDEX IF NOT EXISTS idx_node_lines_origin ON node_lines(origin_expression_id);
 
--- Full-text index over section heading/content/identifier. Stored as an
--- external-content FTS5 table that mirrors `sections` via triggers, so the
--- canonical row data lives in `sections` and the index is purely derived.
--- Multilingual full-text index. We use the `trigram` tokenizer because the
--- default `unicode61` treats every run of CJK characters as a single token,
--- making substring/phrase queries against Chinese / Japanese / Korean text
--- effectively unusable. Trigram indexes 3-codepoint sliding windows so any
--- query of length >= 3 codepoints (in any script) can match by substring,
--- and shorter / prefix queries can be expressed via FTS5 `LIKE`/`GLOB` style.
-CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
+CREATE TABLE IF NOT EXISTS rag_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression_id INTEGER NOT NULL,
+    node_id INTEGER NOT NULL,
+    chunk_eid TEXT NOT NULL,
+    citation TEXT NOT NULL,
+    text TEXT NOT NULL,
+    metadata TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(expression_id, chunk_eid),
+    FOREIGN KEY(expression_id) REFERENCES expressions(id) ON DELETE CASCADE,
+    FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS exports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression_id INTEGER,
+    export_type TEXT NOT NULL,
+    exporter_version TEXT NOT NULL,
+    canonical_hash TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(expression_id) REFERENCES expressions(id) ON DELETE CASCADE
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     heading,
-    content,
-    identifier,
-    content='sections',
+    text,
+    node_eid,
+    content='nodes',
     content_rowid='id',
     tokenize='trigram'
 );
 
-CREATE TRIGGER IF NOT EXISTS sections_ai AFTER INSERT ON sections BEGIN
-    INSERT INTO sections_fts(rowid, heading, content, identifier)
-    VALUES (new.id, new.heading, new.content, new.identifier);
+CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+    INSERT INTO nodes_fts(rowid, heading, text, node_eid)
+    VALUES (new.id, new.heading, new.text, new.node_eid);
 END;
 
-CREATE TRIGGER IF NOT EXISTS sections_ad AFTER DELETE ON sections BEGIN
-    INSERT INTO sections_fts(sections_fts, rowid, heading, content, identifier)
-    VALUES ('delete', old.id, old.heading, old.content, old.identifier);
+CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+    INSERT INTO nodes_fts(nodes_fts, rowid, heading, text, node_eid)
+    VALUES ('delete', old.id, old.heading, old.text, old.node_eid);
 END;
 
-CREATE TRIGGER IF NOT EXISTS sections_au AFTER UPDATE ON sections BEGIN
-    INSERT INTO sections_fts(sections_fts, rowid, heading, content, identifier)
-    VALUES ('delete', old.id, old.heading, old.content, old.identifier);
-    INSERT INTO sections_fts(rowid, heading, content, identifier)
-    VALUES (new.id, new.heading, new.content, new.identifier);
+CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+    INSERT INTO nodes_fts(nodes_fts, rowid, heading, text, node_eid)
+    VALUES ('delete', old.id, old.heading, old.text, old.node_eid);
+    INSERT INTO nodes_fts(rowid, heading, text, node_eid)
+    VALUES (new.id, new.heading, new.text, new.node_eid);
 END;
 """
 
-# Per-version migrations applied lazily when an older DB is opened. Each entry
-# is a list of statements that move the schema from version `key` to `key+1`.
-MIGRATIONS: dict[str, list[str]] = {
-    "1": [
-        "ALTER TABLE document_versions ADD COLUMN xml_hash TEXT",
-        "ALTER TABLE document_versions ADD COLUMN ai_provider TEXT",
-        "ALTER TABLE document_versions ADD COLUMN ai_model TEXT",
-        "ALTER TABLE document_versions ADD COLUMN ai_base_url TEXT",
-        "ALTER TABLE document_versions ADD COLUMN validation_status TEXT",
-        "ALTER TABLE document_versions ADD COLUMN validation_message TEXT",
-        "ALTER TABLE document_versions ADD COLUMN parent_version_id INTEGER REFERENCES document_versions(id)",
-        "CREATE INDEX IF NOT EXISTS idx_versions_parent ON document_versions(parent_version_id)",
-        """CREATE TABLE IF NOT EXISTS revisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code_id TEXT NOT NULL,
-            from_version_id INTEGER,
-            to_version_id INTEGER NOT NULL,
-            sections_added INTEGER NOT NULL DEFAULT 0,
-            sections_removed INTEGER NOT NULL DEFAULT 0,
-            sections_modified INTEGER NOT NULL DEFAULT 0,
-            sections_unchanged INTEGER NOT NULL DEFAULT 0,
-            summary TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(from_version_id, to_version_id),
-            FOREIGN KEY(code_id) REFERENCES codes(id) ON DELETE CASCADE,
-            FOREIGN KEY(from_version_id) REFERENCES document_versions(id) ON DELETE CASCADE,
-            FOREIGN KEY(to_version_id)   REFERENCES document_versions(id) ON DELETE CASCADE
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_revisions_code ON revisions(code_id)",
-        "CREATE INDEX IF NOT EXISTS idx_revisions_to ON revisions(to_version_id)",
-        """CREATE TABLE IF NOT EXISTS section_changes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            revision_id INTEGER NOT NULL,
-            change_type TEXT NOT NULL,
-            identifier TEXT,
-            level TEXT,
-            num TEXT,
-            heading TEXT,
-            from_section_id INTEGER,
-            to_section_id INTEGER,
-            text_diff TEXT,
-            FOREIGN KEY(revision_id)     REFERENCES revisions(id) ON DELETE CASCADE,
-            FOREIGN KEY(from_section_id) REFERENCES sections(id)  ON DELETE SET NULL,
-            FOREIGN KEY(to_section_id)   REFERENCES sections(id)  ON DELETE SET NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_section_changes_rev ON section_changes(revision_id)",
-        "CREATE INDEX IF NOT EXISTS idx_section_changes_type ON section_changes(change_type)",
-        "CREATE INDEX IF NOT EXISTS idx_section_changes_identifier ON section_changes(identifier)",
-    ],
-    "2": [
-        """CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
-            heading,
-            content,
-            identifier,
-            content='sections',
-            content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
-        )""",
-        """CREATE TRIGGER IF NOT EXISTS sections_ai AFTER INSERT ON sections BEGIN
-            INSERT INTO sections_fts(rowid, heading, content, identifier)
-            VALUES (new.id, new.heading, new.content, new.identifier);
-        END""",
-        """CREATE TRIGGER IF NOT EXISTS sections_ad AFTER DELETE ON sections BEGIN
-            INSERT INTO sections_fts(sections_fts, rowid, heading, content, identifier)
-            VALUES ('delete', old.id, old.heading, old.content, old.identifier);
-        END""",
-        """CREATE TRIGGER IF NOT EXISTS sections_au AFTER UPDATE ON sections BEGIN
-            INSERT INTO sections_fts(sections_fts, rowid, heading, content, identifier)
-            VALUES ('delete', old.id, old.heading, old.content, old.identifier);
-            INSERT INTO sections_fts(rowid, heading, content, identifier)
-            VALUES (new.id, new.heading, new.content, new.identifier);
-        END""",
-        # Backfill the FTS index from any sections already present in the DB.
-        "INSERT INTO sections_fts(sections_fts) VALUES('rebuild')",
-    ],
-    "3": [
-        """CREATE TABLE IF NOT EXISTS section_lines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            section_id INTEGER NOT NULL,
-            line_no INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            origin_version_id INTEGER NOT NULL,
-            origin_section_id INTEGER,
-            FOREIGN KEY(section_id)        REFERENCES sections(id)          ON DELETE CASCADE,
-            FOREIGN KEY(origin_version_id) REFERENCES document_versions(id) ON DELETE CASCADE,
-            FOREIGN KEY(origin_section_id) REFERENCES sections(id)          ON DELETE SET NULL,
-            UNIQUE(section_id, line_no)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_section_lines_section ON section_lines(section_id)",
-        "CREATE INDEX IF NOT EXISTS idx_section_lines_origin_version ON section_lines(origin_version_id)",
-    ],
-    # Switch the FTS tokenizer from unicode61 to trigram for proper CJK /
-    # multilingual substring matching. Drop the old triggers + virtual table,
-    # then let the SCHEMA_SQL re-create them with the new tokenizer and
-    # rebuild the index from `sections`.
-    "4": [
-        "DROP TRIGGER IF EXISTS sections_au",
-        "DROP TRIGGER IF EXISTS sections_ad",
-        "DROP TRIGGER IF EXISTS sections_ai",
-        "DROP TABLE IF EXISTS sections_fts",
-    ],
-}
+_DROP_TABLES = [
+    "nodes_fts",
+    "sections_fts",
+    "exports",
+    "rag_chunks",
+    "node_lines",
+    "section_lines",
+    "node_changes",
+    "section_changes",
+    "revisions",
+    "processing_log",
+    "node_blocks",
+    "nodes",
+    "sections",
+    "expressions",
+    "document_versions",
+    "works",
+    "codes",
+    "schema_meta",
+]
+
+_DROP_TRIGGERS = [
+    "nodes_ai",
+    "nodes_ad",
+    "nodes_au",
+    "sections_ai",
+    "sections_ad",
+    "sections_au",
+]
 
 
 def utcnow() -> str:
@@ -314,18 +284,12 @@ def connect(db_path: Path | str) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: Path | str) -> None:
-    """Create the database file (or migrate an existing one) and apply the schema."""
+    """Create a UCDB 0.2 database, replacing older UCDB schemas."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
-        # Run migrations first so the SCHEMA_SQL re-application (with its
-        # IF NOT EXISTS clauses) doesn't reference columns that an older DB
-        # hasn't grown yet.
-        needs_fts_rebuild = _migrate(conn)
+        if _current_schema_version(conn) not in {None, SCHEMA_VERSION}:
+            _drop_known_schema(conn)
         conn.executescript(SCHEMA_SQL)
-        if needs_fts_rebuild:
-            # FTS tokenizer changed: SCHEMA_SQL has just recreated the empty
-            # external-content virtual table, so backfill from `sections`.
-            conn.execute("INSERT INTO sections_fts(sections_fts) VALUES('rebuild')")
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", SCHEMA_VERSION),
@@ -337,259 +301,243 @@ def init_db(db_path: Path | str) -> None:
 
 
 def _current_schema_version(conn: sqlite3.Connection) -> str | None:
-    # On a brand-new DB the meta table does not exist yet — treat that as
-    # "no recorded version" so callers can apply the initial schema.
     try:
-        cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
     except sqlite3.OperationalError:
         return None
-    row = cur.fetchone()
     return row[0] if row else None
 
 
-def _migrate(conn: sqlite3.Connection) -> bool:
-    """Apply pending migrations to bring an existing DB up to ``SCHEMA_VERSION``.
-
-    Returns True if a migration ran that requires the FTS index to be rebuilt
-    after the canonical SCHEMA_SQL has finished re-creating the virtual table.
-    """
-    current = _current_schema_version(conn) or "0"
-    needs_fts_rebuild = False
-    while current in MIGRATIONS and current != SCHEMA_VERSION:
-        for stmt in MIGRATIONS[current]:
-            conn.execute(stmt)
-        if current == "3":
-            # Migration 3 → 4 dropped sections_fts; the caller will re-create
-            # the virtual table from SCHEMA_SQL and must then rebuild it.
-            needs_fts_rebuild = True
-        current = str(int(current) + 1)
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
-            ("schema_version", current),
-        )
-    return needs_fts_rebuild
+def _drop_known_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = OFF")
+    for trigger in _DROP_TRIGGERS:
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    for table in _DROP_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    conn.execute("PRAGMA foreign_keys = ON")
 
 
-def upsert_code(
+def upsert_work(
     conn: sqlite3.Connection,
-    code_id: str,
+    work_id: str,
+    *,
+    jurisdiction: str = "tw",
+    document_class: str = "law",
     title: str | None = None,
-    description: str | None = None,
+    source_authority: str | None = None,
 ) -> None:
     now = utcnow()
     conn.execute(
         """
-        INSERT INTO codes(id, title, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO works(
+            id, jurisdiction, document_class, title, source_authority,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            title = COALESCE(excluded.title, codes.title),
-            description = COALESCE(excluded.description, codes.description),
+            jurisdiction = excluded.jurisdiction,
+            document_class = excluded.document_class,
+            title = COALESCE(excluded.title, works.title),
+            source_authority = COALESCE(excluded.source_authority, works.source_authority),
             updated_at = excluded.updated_at
         """,
-        (code_id, title, description, now, now),
+        (work_id, jurisdiction, document_class, title, source_authority, now, now),
     )
 
 
-def find_version_by_hash(
-    conn: sqlite3.Connection, code_id: str, source_hash: str
+def find_expression_by_hash(
+    conn: sqlite3.Connection, work_id: str, source_hash: str, language: str
 ) -> sqlite3.Row | None:
-    cur = conn.execute(
-        "SELECT * FROM document_versions WHERE code_id = ? AND source_hash = ?",
-        (code_id, source_hash),
-    )
-    return cur.fetchone()
+    return conn.execute(
+        """
+        SELECT * FROM expressions
+        WHERE work_id = ? AND source_hash = ? AND language = ?
+        """,
+        (work_id, source_hash, language),
+    ).fetchone()
 
 
-def create_version(
+def create_expression(
     conn: sqlite3.Connection,
     *,
-    code_id: str,
+    work_id: str,
     version_label: str,
-    source_path: str,
+    language: str,
     source_hash: str,
-    source_size: int | None,
-    source_mime: str | None,
+    akn_profile: str,
+    expression_date: str | None = None,
     effective_date: str | None = None,
+    promulgation_date: str | None = None,
+    enforcement_date: str | None = None,
+    source_path: str | None = None,
+    source_url: str | None = None,
+    source_size: int | None = None,
+    source_mime: str | None = None,
 ) -> int:
-    now = utcnow()
     cur = conn.execute(
         """
-        INSERT INTO document_versions(
-            code_id, version_label, effective_date,
-            source_path, source_hash, source_size, source_mime,
-            status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        INSERT INTO expressions(
+            work_id, version_label, language, expression_date, effective_date,
+            promulgation_date, enforcement_date, source_path, source_url, source_hash,
+            source_size, source_mime, akn_profile, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """,
         (
-            code_id,
+            work_id,
             version_label,
+            language,
+            expression_date,
             effective_date,
+            promulgation_date,
+            enforcement_date,
             source_path,
+            source_url,
             source_hash,
             source_size,
             source_mime,
-            now,
+            akn_profile,
+            utcnow(),
         ),
     )
     return int(cur.lastrowid)
 
 
-def set_version_status(
+def set_expression_status(
     conn: sqlite3.Connection,
-    version_id: int,
+    expression_id: int,
     status: str,
     *,
-    xml_content: str | None = None,
-    xml_hash: str | None = None,
+    canonical_xml: str | None = None,
+    canonical_hash: str | None = None,
+    canonical_format: str | None = None,
     ai_provider: str | None = None,
     ai_model: str | None = None,
     ai_base_url: str | None = None,
     validation_status: str | None = None,
     validation_message: str | None = None,
-    parent_version_id: int | None = None,
+    parent_expression_id: int | None = None,
     mark_processed: bool = False,
 ) -> None:
     fields = ["status = ?"]
     params: list[Any] = [status]
-    if xml_content is not None:
-        fields.append("xml_content = ?")
-        params.append(xml_content)
-    if xml_hash is not None:
-        fields.append("xml_hash = ?")
-        params.append(xml_hash)
-    if ai_provider is not None:
-        fields.append("ai_provider = ?")
-        params.append(ai_provider)
-    if ai_model is not None:
-        fields.append("ai_model = ?")
-        params.append(ai_model)
-    if ai_base_url is not None:
-        fields.append("ai_base_url = ?")
-        params.append(ai_base_url)
-    if validation_status is not None:
-        fields.append("validation_status = ?")
-        params.append(validation_status)
-    if validation_message is not None:
-        fields.append("validation_message = ?")
-        params.append(validation_message)
-    if parent_version_id is not None:
-        fields.append("parent_version_id = ?")
-        params.append(parent_version_id)
+    optional = {
+        "canonical_xml": canonical_xml,
+        "canonical_hash": canonical_hash,
+        "canonical_format": canonical_format,
+        "ai_provider": ai_provider,
+        "ai_model": ai_model,
+        "ai_base_url": ai_base_url,
+        "validation_status": validation_status,
+        "validation_message": validation_message,
+        "parent_expression_id": parent_expression_id,
+    }
+    for key, value in optional.items():
+        if value is not None:
+            fields.append(f"{key} = ?")
+            params.append(value)
     if mark_processed:
         fields.append("processed_at = ?")
         params.append(utcnow())
-    params.append(version_id)
+    params.append(expression_id)
     conn.execute(
-        f"UPDATE document_versions SET {', '.join(fields)} WHERE id = ?",
+        f"UPDATE expressions SET {', '.join(fields)} WHERE id = ?",
         params,
     )
 
 
-def previous_version(
-    conn: sqlite3.Connection, code_id: str, version_label: str
+def previous_expression(
+    conn: sqlite3.Connection, work_id: str, version_label: str, language: str
 ) -> sqlite3.Row | None:
-    """Return the most recent imported version of *code_id* whose label sorts before *version_label*."""
-    cur = conn.execute(
+    return conn.execute(
         """
-        SELECT * FROM document_versions
-        WHERE code_id = ? AND version_label < ? AND status = 'imported'
+        SELECT * FROM expressions
+        WHERE work_id = ? AND version_label < ? AND language = ? AND status = 'imported'
         ORDER BY version_label DESC
         LIMIT 1
         """,
-        (code_id, version_label),
-    )
-    return cur.fetchone()
+        (work_id, version_label, language),
+    ).fetchone()
 
 
-def list_revisions(conn: sqlite3.Connection, code_id: str) -> list[sqlite3.Row]:
-    return list(
-        conn.execute(
-            """
-            SELECT r.*,
-                   vf.version_label AS from_label,
-                   vt.version_label AS to_label
-            FROM revisions r
-            LEFT JOIN document_versions vf ON vf.id = r.from_version_id
-            JOIN document_versions vt ON vt.id = r.to_version_id
-            WHERE r.code_id = ?
-            ORDER BY vt.version_label
-            """,
-            (code_id,),
-        )
-    )
+def clear_expression_nodes(conn: sqlite3.Connection, expression_id: int) -> None:
+    conn.execute("DELETE FROM nodes WHERE expression_id = ?", (expression_id,))
 
 
-def get_revision(conn: sqlite3.Connection, revision_id: int) -> sqlite3.Row | None:
-    cur = conn.execute(
-        """
-        SELECT r.*,
-               vf.version_label AS from_label,
-               vt.version_label AS to_label,
-               vt.code_id AS code_id_resolved
-        FROM revisions r
-        LEFT JOIN document_versions vf ON vf.id = r.from_version_id
-        JOIN document_versions vt ON vt.id = r.to_version_id
-        WHERE r.id = ?
-        """,
-        (revision_id,),
-    )
-    return cur.fetchone()
-
-
-def list_section_changes(
-    conn: sqlite3.Connection,
-    revision_id: int,
-    *,
-    change_type: str | None = None,
-) -> list[sqlite3.Row]:
-    sql = "SELECT * FROM section_changes WHERE revision_id = ?"
-    params: list[Any] = [revision_id]
-    if change_type:
-        sql += " AND change_type = ?"
-        params.append(change_type)
-    sql += " ORDER BY id"
-    return list(conn.execute(sql, params))
-
-
-def get_section_change(conn: sqlite3.Connection, change_id: int) -> sqlite3.Row | None:
-    cur = conn.execute("SELECT * FROM section_changes WHERE id = ?", (change_id,))
-    return cur.fetchone()
-
-
-def clear_version_sections(conn: sqlite3.Connection, version_id: int) -> None:
-    conn.execute("DELETE FROM sections WHERE version_id = ?", (version_id,))
-
-
-def insert_section(
+def insert_node(
     conn: sqlite3.Connection,
     *,
-    version_id: int,
+    expression_id: int,
     parent_id: int | None,
-    level: str,
-    identifier: str | None,
+    node_eid: str,
+    node_type: str,
+    profile_type: str | None,
     num: str | None,
     heading: str | None,
-    content: str | None,
-    xml_fragment: str | None,
+    text: str | None,
+    xml_fragment: str,
+    text_hash: str | None,
+    normalized_text_hash: str | None,
     ordering: int,
+    depth: int,
+    source_locator: str | None,
 ) -> int:
     cur = conn.execute(
         """
-        INSERT INTO sections(
-            version_id, parent_id, level, identifier, num,
-            heading, content, xml_fragment, ordering
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO nodes(
+            expression_id, parent_id, node_eid, node_type, profile_type,
+            num, heading, text, xml_fragment, text_hash, normalized_text_hash,
+            ordering, depth, source_locator
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            version_id,
+            expression_id,
             parent_id,
-            level,
-            identifier,
+            node_eid,
+            node_type,
+            profile_type,
             num,
             heading,
-            content,
+            text,
+            xml_fragment,
+            text_hash,
+            normalized_text_hash,
+            ordering,
+            depth,
+            source_locator,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def insert_node_block(
+    conn: sqlite3.Connection,
+    *,
+    node_id: int,
+    block_eid: str | None,
+    block_type: str,
+    text: str | None,
+    xml_fragment: str,
+    ordering: int,
+    text_hash: str | None,
+    normalized_text_hash: str | None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO node_blocks(
+            node_id, block_eid, block_type, text, xml_fragment,
+            ordering, text_hash, normalized_text_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            node_id,
+            block_eid,
+            block_type,
+            text,
             xml_fragment,
             ordering,
+            text_hash,
+            normalized_text_hash,
         ),
     )
     return int(cur.lastrowid)
@@ -601,168 +549,216 @@ def log_event(
     step: str,
     status: str,
     message: str | None = None,
-    code_id: str | None = None,
-    version_id: int | None = None,
+    work_id: str | None = None,
+    expression_id: int | None = None,
     details: dict | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO processing_log(
-            code_id, version_id, step, status, message, details, created_at
+            work_id, expression_id, step, status, message, details, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            code_id,
-            version_id,
+            work_id,
+            expression_id,
             step,
             status,
             message,
-            json.dumps(details) if details else None,
+            json.dumps(details, ensure_ascii=False) if details else None,
             utcnow(),
         ),
     )
 
 
-def list_codes(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return list(conn.execute("SELECT * FROM codes ORDER BY id"))
+def list_works(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(conn.execute("SELECT * FROM works ORDER BY id"))
 
 
-def list_versions(conn: sqlite3.Connection, code_id: str) -> list[sqlite3.Row]:
+def list_expressions(conn: sqlite3.Connection, work_id: str) -> list[sqlite3.Row]:
     return list(
         conn.execute(
-            "SELECT * FROM document_versions WHERE code_id = ? ORDER BY version_label",
-            (code_id,),
+            "SELECT * FROM expressions WHERE work_id = ? ORDER BY version_label, language",
+            (work_id,),
         )
     )
 
 
-def list_sections(conn: sqlite3.Connection, version_id: int) -> list[sqlite3.Row]:
-    return list(
-        conn.execute(
-            "SELECT * FROM sections WHERE version_id = ? ORDER BY ordering",
-            (version_id,),
-        )
-    )
+def get_expression(conn: sqlite3.Connection, expression_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM expressions WHERE id = ?", (expression_id,)
+    ).fetchone()
 
 
-def get_version(conn: sqlite3.Connection, version_id: int) -> sqlite3.Row | None:
-    cur = conn.execute("SELECT * FROM document_versions WHERE id = ?", (version_id,))
-    return cur.fetchone()
-
-
-def find_version_by_label(
-    conn: sqlite3.Connection, code_id: str, version_label: str
+def find_expression_by_label(
+    conn: sqlite3.Connection, work_id: str, version_label: str, language: str = "zho"
 ) -> sqlite3.Row | None:
-    cur = conn.execute(
-        "SELECT * FROM document_versions WHERE code_id = ? AND version_label = ?",
-        (code_id, version_label),
-    )
-    return cur.fetchone()
-
-
-def latest_version(conn: sqlite3.Connection, code_id: str) -> sqlite3.Row | None:
-    """Return the most recent imported version of *code_id* (lexicographic)."""
-    cur = conn.execute(
+    return conn.execute(
         """
-        SELECT * FROM document_versions
-        WHERE code_id = ? AND status = 'imported'
+        SELECT * FROM expressions
+        WHERE work_id = ? AND version_label = ? AND language = ?
+        """,
+        (work_id, version_label, language),
+    ).fetchone()
+
+
+def latest_expression(
+    conn: sqlite3.Connection, work_id: str, language: str = "zho"
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM expressions
+        WHERE work_id = ? AND language = ? AND status = 'imported'
         ORDER BY version_label DESC
         LIMIT 1
         """,
-        (code_id,),
+        (work_id, language),
+    ).fetchone()
+
+
+def list_nodes(conn: sqlite3.Connection, expression_id: int) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM nodes WHERE expression_id = ? ORDER BY ordering",
+            (expression_id,),
+        )
     )
-    return cur.fetchone()
 
 
-def find_section_by_identifier(
-    conn: sqlite3.Connection, version_id: int, identifier: str
+def find_node_by_eid(
+    conn: sqlite3.Connection, expression_id: int, node_eid: str
 ) -> sqlite3.Row | None:
-    cur = conn.execute(
-        "SELECT * FROM sections WHERE version_id = ? AND identifier = ?",
-        (version_id, identifier),
-    )
-    return cur.fetchone()
+    return conn.execute(
+        "SELECT * FROM nodes WHERE expression_id = ? AND node_eid = ?",
+        (expression_id, node_eid),
+    ).fetchone()
 
 
-def get_section_lines(conn: sqlite3.Connection, section_id: int) -> list[sqlite3.Row]:
-    """Return blame rows for *section_id*, joined with origin version labels."""
+def get_node_lines(conn: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
             """
             SELECT
-                sl.line_no,
-                sl.text,
-                sl.origin_version_id,
-                sl.origin_section_id,
-                v.version_label AS origin_version_label,
-                v.code_id       AS origin_code_id,
-                v.effective_date AS origin_effective_date
-            FROM section_lines sl
-            JOIN document_versions v ON v.id = sl.origin_version_id
-            WHERE sl.section_id = ?
-            ORDER BY sl.line_no
+                nl.line_no,
+                nl.text,
+                nl.origin_expression_id,
+                nl.origin_node_id,
+                e.version_label AS origin_version_label,
+                e.work_id AS origin_work_id,
+                e.effective_date AS origin_effective_date
+            FROM node_lines nl
+            JOIN expressions e ON e.id = nl.origin_expression_id
+            WHERE nl.node_id = ?
+            ORDER BY nl.line_no
             """,
-            (section_id,),
+            (node_id,),
         )
     )
 
 
-def section_history(
-    conn: sqlite3.Connection, code_id: str, identifier: str
+def list_revisions(conn: sqlite3.Connection, work_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            """
+            SELECT r.*,
+                   fe.version_label AS from_label,
+                   te.version_label AS to_label
+            FROM revisions r
+            LEFT JOIN expressions fe ON fe.id = r.from_expression_id
+            JOIN expressions te ON te.id = r.to_expression_id
+            WHERE r.work_id = ?
+            ORDER BY te.version_label, r.id
+            """,
+            (work_id,),
+        )
+    )
+
+
+def get_revision(conn: sqlite3.Connection, revision_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT r.*,
+               fe.version_label AS from_label,
+               te.version_label AS to_label,
+               te.work_id AS work_id_resolved
+        FROM revisions r
+        LEFT JOIN expressions fe ON fe.id = r.from_expression_id
+        JOIN expressions te ON te.id = r.to_expression_id
+        WHERE r.id = ?
+        """,
+        (revision_id,),
+    ).fetchone()
+
+
+def list_node_changes(
+    conn: sqlite3.Connection,
+    revision_id: int,
+    *,
+    change_type: str | None = None,
 ) -> list[sqlite3.Row]:
-    """Every revision in *code_id* that touched a section with *identifier*."""
+    sql = "SELECT * FROM node_changes WHERE revision_id = ?"
+    params: list[Any] = [revision_id]
+    if change_type:
+        sql += " AND change_type = ?"
+        params.append(change_type)
+    sql += " ORDER BY id"
+    return list(conn.execute(sql, params))
+
+
+def get_node_change(conn: sqlite3.Connection, change_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM node_changes WHERE id = ?", (change_id,)
+    ).fetchone()
+
+
+def node_history(
+    conn: sqlite3.Connection, work_id: str, node_eid: str
+) -> list[sqlite3.Row]:
     return list(
         conn.execute(
             """
             SELECT
-                sc.id            AS change_id,
-                sc.change_type,
-                sc.level,
-                sc.num,
-                sc.heading,
-                sc.text_diff,
-                sc.from_section_id,
-                sc.to_section_id,
-                r.id             AS revision_id,
-                r.from_version_id,
-                r.to_version_id,
-                vf.version_label AS from_label,
-                vt.version_label AS to_label,
-                vt.effective_date AS to_effective_date
-            FROM section_changes sc
-            JOIN revisions r ON r.id = sc.revision_id
-            LEFT JOIN document_versions vf ON vf.id = r.from_version_id
-            JOIN document_versions vt ON vt.id = r.to_version_id
-            WHERE r.code_id = ? AND sc.identifier = ?
-            ORDER BY vt.version_label, sc.id
+                nc.id AS change_id,
+                nc.change_type,
+                nc.node_type,
+                nc.num,
+                nc.heading,
+                nc.text_diff,
+                nc.from_node_id,
+                nc.to_node_id,
+                r.id AS revision_id,
+                r.from_expression_id,
+                r.to_expression_id,
+                fe.version_label AS from_label,
+                te.version_label AS to_label,
+                te.effective_date AS to_effective_date
+            FROM node_changes nc
+            JOIN revisions r ON r.id = nc.revision_id
+            LEFT JOIN expressions fe ON fe.id = r.from_expression_id
+            JOIN expressions te ON te.id = r.to_expression_id
+            WHERE r.work_id = ? AND nc.node_eid = ?
+            ORDER BY te.version_label, nc.id
             """,
-            (code_id, identifier),
+            (work_id, node_eid),
         )
     )
 
 
-def diff_versions(
+def diff_expressions(
     conn: sqlite3.Connection,
     *,
-    code_id: str,
-    from_version_id: int,
-    to_version_id: int,
-    identifier: str | None = None,
+    work_id: str,
+    from_expression_id: int,
+    to_expression_id: int,
+    node_eid: str | None = None,
 ):
-    """Compute a diff between any two versions of *code_id*, on the fly.
+    from .revisions import CompareStats, compare_node_sets
 
-    Unlike persisted ``revisions``, this does not write to the database — it
-    runs the same comparison core (``compare_section_sets``) and returns a
-    fresh list of :class:`revisions.SectionChange` objects.
-    """
-    # Local import to avoid a circular module-load cycle: revisions imports db.
-    from .revisions import CompareStats, compare_section_sets
-
-    from_sections = list_sections(conn, from_version_id)
-    to_sections = list_sections(conn, to_version_id)
-    changes, stats = compare_section_sets(from_sections, to_sections)
-    if identifier:
-        changes = [c for c in changes if c.identifier == identifier]
+    from_nodes = list_nodes(conn, from_expression_id)
+    to_nodes = list_nodes(conn, to_expression_id)
+    changes, stats = compare_node_sets(from_nodes, to_nodes)
+    if node_eid:
+        changes = [c for c in changes if c.node_eid == node_eid]
         stats = CompareStats(
             added=sum(1 for c in changes if c.change_type == "added"),
             removed=sum(1 for c in changes if c.change_type == "removed"),
@@ -772,37 +768,26 @@ def diff_versions(
     return changes, stats
 
 
-def _fts_phrase(query: str) -> str:
-    """Wrap *query* as a single FTS5 phrase, escaping embedded double quotes."""
-    return '"' + query.replace('"', '""') + '"'
-
-
-def search_sections(
+def search_nodes(
     conn: sqlite3.Connection,
     query: str,
     *,
-    code_id: str | None = None,
+    work_id: str | None = None,
     limit: int = 50,
     raw: bool = False,
 ) -> list[sqlite3.Row]:
-    """Full-text search over sections using the FTS5 ``sections_fts`` index.
-
-    By default the input is treated as a single phrase, so any punctuation or
-    whitespace is matched literally. Pass ``raw=True`` to forward FTS5 query
-    syntax (boolean ops, prefix ``*``, ``NEAR``, column filters) verbatim.
-    """
     match_expr = query if raw else _fts_phrase(query)
     sql = """
-        SELECT s.*, v.code_id, v.version_label, bm25(sections_fts) AS rank
-        FROM sections_fts
-        JOIN sections s ON s.id = sections_fts.rowid
-        JOIN document_versions v ON v.id = s.version_id
-        WHERE sections_fts MATCH ?
+        SELECT n.*, e.work_id, e.version_label, e.language, bm25(nodes_fts) AS rank
+        FROM nodes_fts
+        JOIN nodes n ON n.id = nodes_fts.rowid
+        JOIN expressions e ON e.id = n.expression_id
+        WHERE nodes_fts MATCH ?
     """
     params: list[Any] = [match_expr]
-    if code_id:
-        sql += " AND v.code_id = ?"
-        params.append(code_id)
+    if work_id:
+        sql += " AND e.work_id = ?"
+        params.append(work_id)
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit)
     return list(conn.execute(sql, params))
@@ -811,18 +796,22 @@ def search_sections(
 def list_processing_log(
     conn: sqlite3.Connection,
     *,
-    code_id: str | None = None,
-    version_id: int | None = None,
+    work_id: str | None = None,
+    expression_id: int | None = None,
     limit: int = 100,
 ) -> list[sqlite3.Row]:
     sql = "SELECT * FROM processing_log WHERE 1=1"
     params: list[Any] = []
-    if code_id:
-        sql += " AND code_id = ?"
-        params.append(code_id)
-    if version_id is not None:
-        sql += " AND version_id = ?"
-        params.append(version_id)
+    if work_id:
+        sql += " AND work_id = ?"
+        params.append(work_id)
+    if expression_id is not None:
+        sql += " AND expression_id = ?"
+        params.append(expression_id)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     return list(conn.execute(sql, params))
+
+
+def _fts_phrase(query: str) -> str:
+    return '"' + query.replace('"', '""') + '"'

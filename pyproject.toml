@@ -1,7 +1,7 @@
 [project]
 name = "ucdb"
-version = "0.1.1"
-description = "Universal Code Database — convert legacy legal documents (PDF/DOCX/ODT/MD/TXT) into a queryable SQLite database based on the United States Legislative Markup (USLM) XML schema."
+version = "0.2.0"
+description = "Universal Code Database — convert legal documents into portable SQLite databases with Akoma Ntoso / LegalDocML as the canonical XML format."
 readme = "README.md"
 requires-python = ">=3.13"
 license = { file = "LICENSE" }
@@ -11,7 +11,8 @@ authors = [
 keywords = [
     "legal",
     "legislation",
-    "uslm",
+    "akoma-ntoso",
+    "legaldocml",
     "sqlite",
     "ai",
     "document-processing",

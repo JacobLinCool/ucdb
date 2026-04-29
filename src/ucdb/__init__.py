@@ -1,3 +1,3 @@
-"""ucdb — Universal Code Database: convert legacy legal documents into SQLite via USLM XML."""
+"""ucdb — Universal Code Database: Akoma Ntoso legal data in SQLite."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -13,24 +13,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixture  # noqa: E402
 
 from ucdb import db  # noqa: E402
-from ucdb.process import import_xml_file  # noqa: E402
+from ucdb.process import import_akn_file  # noqa: E402
 from ucdb.web import BrowserStore  # noqa: E402
 
-CODE_ID = "tax-code"
+WORK_ID = "tax-work"
 
 
 def _seed(workdir: Path) -> Path:
     db_path = workdir / "db.sqlite3"
     db.init_db(db_path)
-    for version_label, sections in fixture.build_versions()[:2]:
+    for version_label, nodes in fixture.build_versions()[:2]:
         xml_path = workdir / f"{version_label}.xml"
-        xml_path.write_text(
-            fixture.to_uslm_xml(version_label, sections), encoding="utf-8"
-        )
+        xml_path.write_text(fixture.to_akn_xml(version_label, nodes), encoding="utf-8")
         with db.connect(db_path) as conn:
-            result = import_xml_file(
+            result = import_akn_file(
                 conn,
-                code_id=CODE_ID,
+                work_id=WORK_ID,
                 version_label=version_label,
                 xml_path=xml_path,
                 validate_schema=False,
@@ -43,33 +41,33 @@ def test_browser_store_lists_collected_metadata(workdir: Path) -> None:
     store = BrowserStore(_seed(workdir))
 
     summary = store.summary()
-    codes = store.codes()
-    versions = store.versions(CODE_ID)
-    sections = store.sections(int(versions[-1]["id"]))
+    works = store.works()
+    expressions = store.expressions(WORK_ID)
+    nodes = store.nodes(int(expressions[-1]["id"]))
 
-    assert summary["codes"] == 1
-    assert summary["versions"] == 2
-    assert summary["sections"] > 0
-    assert codes[0]["id"] == CODE_ID
-    assert codes[0]["version_count"] == 2
-    assert versions[-1]["section_count"] > 0
-    assert sections
+    assert summary["works"] == 1
+    assert summary["expressions"] == 2
+    assert summary["nodes"] > 0
+    assert works[0]["id"] == WORK_ID
+    assert works[0]["expression_count"] == 2
+    assert expressions[-1]["node_count"] > 0
+    assert nodes
 
 
 def test_browser_store_searches_and_opens_docs_diffs(workdir: Path) -> None:
     store = BrowserStore(_seed(workdir))
 
-    results = store.search("twenty-five percent", code_id=CODE_ID)
+    results = store.search("twenty-five percent", work_id=WORK_ID)
     assert results
 
-    section = store.section(int(results[0]["id"]))
-    assert section is not None
-    assert section["content"]
-    assert section["xml_fragment"]
-    assert "lines" in section
-    assert "history" in section
+    node = store.node(int(results[0]["id"]))
+    assert node is not None
+    assert node["text"]
+    assert node["xml_fragment"]
+    assert "lines" in node
+    assert "history" in node
 
-    revisions = store.revisions(CODE_ID)
+    revisions = store.revisions(WORK_ID)
     assert revisions
     changes = store.changes(int(revisions[-1]["id"]))
     assert changes
