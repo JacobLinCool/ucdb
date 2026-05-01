@@ -44,6 +44,7 @@ def test_browser_store_lists_collected_metadata(workdir: Path) -> None:
     works = store.works()
     expressions = store.expressions(WORK_ID)
     nodes = store.nodes(int(expressions[-1]["id"]))
+    document = store.document(int(expressions[-1]["id"]))
 
     assert summary["works"] == 1
     assert summary["expressions"] == 2
@@ -52,6 +53,9 @@ def test_browser_store_lists_collected_metadata(workdir: Path) -> None:
     assert works[0]["expression_count"] == 2
     assert expressions[-1]["node_count"] > 0
     assert nodes
+    assert document
+    assert "depth" in document[0]
+    assert any(row["text"] for row in document)
 
 
 def test_browser_store_searches_and_opens_docs_diffs(workdir: Path) -> None:
@@ -74,6 +78,28 @@ def test_browser_store_searches_and_opens_docs_diffs(workdir: Path) -> None:
     change = store.change(int(changes[0]["id"]))
     assert change is not None
     assert change["change_type"] in {"added", "removed", "modified"}
+
+
+def test_browser_store_compares_documents_between_versions(workdir: Path) -> None:
+    store = BrowserStore(_seed(workdir))
+    expressions = store.expressions(WORK_ID)
+
+    diff = store.document_diff(int(expressions[0]["id"]), int(expressions[1]["id"]))
+
+    assert diff is not None
+    assert diff["from_expression"]["version_label"] == "2020-01-01"
+    assert diff["to_expression"]["version_label"] == "2020-07-01"
+    assert diff["stats"]["added"] > 0
+    assert diff["stats"]["modified"] > 0
+    assert diff["stats"]["unchanged"] > 0
+    assert any(row["change_type"] == "added" and row["to"] for row in diff["rows"])
+    assert any(
+        row["change_type"] == "modified"
+        and row["from"]
+        and row["to"]
+        and row["text_diff"]
+        for row in diff["rows"]
+    )
 
 
 try:

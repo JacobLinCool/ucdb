@@ -6,11 +6,14 @@ import json
 import sqlite3
 import webbrowser
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import parse_qs, quote, unquote, urlparse
+
+from .revisions import text_diff
 
 JsonDict = dict[str, Any]
 
@@ -104,7 +107,7 @@ class BrowserStore:
             rows = conn.execute(
                 """
                 SELECT id, expression_id, parent_id, node_type, node_eid, num,
-                       heading, ordering, text
+                       heading, ordering, depth, text
                 FROM nodes
                 WHERE expression_id = ?
                 ORDER BY ordering
@@ -113,6 +116,33 @@ class BrowserStore:
                 (expression_id, _clamp(limit, 1, 20000)),
             )
             return [_row(row) for row in rows]
+
+    def document_diff(
+        self,
+        from_expression_id: int,
+        to_expression_id: int,
+        *,
+        limit: int = 10000,
+    ) -> JsonDict | None:
+        limit = _clamp(limit, 1, 20000)
+        with self.connect() as conn:
+            from_expression = _expression_summary(conn, from_expression_id)
+            to_expression = _expression_summary(conn, to_expression_id)
+            if from_expression is None or to_expression is None:
+                return None
+            if from_expression["work_id"] != to_expression["work_id"]:
+                raise ValueError(
+                    "from_expression_id and to_expression_id must share a work"
+                )
+            from_nodes = _document_nodes(conn, from_expression_id, limit)
+            to_nodes = _document_nodes(conn, to_expression_id, limit)
+            rows, stats = _document_diff_rows(from_nodes, to_nodes)
+            return {
+                "from_expression": from_expression,
+                "to_expression": to_expression,
+                "stats": stats,
+                "rows": rows,
+            }
 
     def node(self, node_id: int) -> JsonDict | None:
         with self.connect() as conn:
@@ -331,6 +361,24 @@ def make_handler(store: BrowserStore) -> type[BaseHTTPRequestHandler]:
                             )
                         }
                     )
+                elif parsed.path == "/api/document":
+                    self._send_json(
+                        {
+                            "document": store.document(
+                                _int_required(query, "expression_id"),
+                                limit=_int(query, "limit", 5000),
+                            )
+                        }
+                    )
+                elif parsed.path == "/api/document-diff":
+                    self._send_json_or_404(
+                        store.document_diff(
+                            _int_required(query, "from_expression_id"),
+                            _int_required(query, "to_expression_id"),
+                            limit=_int(query, "limit", 10000),
+                        ),
+                        "expression not found",
+                    )
                 elif parsed.path == "/api/node":
                     self._send_json_or_404(
                         store.node(_int_required(query, "id")), "node not found"
@@ -417,6 +465,110 @@ def _scalar(conn: sqlite3.Connection, sql: str) -> Any:
 
 def _row(row: sqlite3.Row) -> JsonDict:
     return {key: row[key] for key in row.keys()}
+
+
+def _expression_summary(
+    conn: sqlite3.Connection, expression_id: int
+) -> JsonDict | None:
+    row = conn.execute(
+        """
+        SELECT id, work_id, version_label, language, effective_date, source_path
+        FROM expressions
+        WHERE id = ?
+        """,
+        (expression_id,),
+    ).fetchone()
+    return _row(row) if row else None
+
+
+def _document_nodes(
+    conn: sqlite3.Connection, expression_id: int, limit: int
+) -> list[JsonDict]:
+    rows = conn.execute(
+        """
+        SELECT id, expression_id, parent_id, node_type, node_eid, num,
+               heading, ordering, depth, text, normalized_text_hash
+        FROM nodes
+        WHERE expression_id = ?
+        ORDER BY ordering
+        LIMIT ?
+        """,
+        (expression_id, limit),
+    )
+    return [_row(row) for row in rows]
+
+
+def _document_diff_rows(
+    from_nodes: list[JsonDict], to_nodes: list[JsonDict]
+) -> tuple[list[JsonDict], JsonDict]:
+    rows: list[JsonDict] = []
+    stats = {"added": 0, "removed": 0, "modified": 0, "unchanged": 0}
+    from_eids = [str(row["node_eid"]) for row in from_nodes]
+    to_eids = [str(row["node_eid"]) for row in to_nodes]
+    matcher = SequenceMatcher(a=from_eids, b=to_eids, autojunk=False)
+
+    def append_row(
+        change_type: str, before: JsonDict | None, after: JsonDict | None
+    ) -> None:
+        stats[change_type] += 1
+        snapshot = after or before or {}
+        rows.append(
+            {
+                "change_type": change_type,
+                "node_eid": snapshot.get("node_eid"),
+                "node_type": snapshot.get("node_type"),
+                "num": snapshot.get("num"),
+                "heading": snapshot.get("heading"),
+                "depth": snapshot.get("depth", 0),
+                "from": _diff_node_payload(before),
+                "to": _diff_node_payload(after),
+                "text_diff": text_diff(
+                    before.get("text") if before else None,
+                    after.get("text") if after else None,
+                )
+                if change_type == "modified"
+                else "",
+            }
+        )
+
+    for tag, from_start, from_end, to_start, to_end in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(from_end - from_start):
+                before = from_nodes[from_start + offset]
+                after = to_nodes[to_start + offset]
+                change_type = (
+                    "modified" if _node_changed(before, after) else "unchanged"
+                )
+                append_row(change_type, before, after)
+            continue
+        if tag in {"delete", "replace"}:
+            for before in from_nodes[from_start:from_end]:
+                append_row("removed", before, None)
+        if tag in {"insert", "replace"}:
+            for after in to_nodes[to_start:to_end]:
+                append_row("added", None, after)
+    return rows, stats
+
+
+def _diff_node_payload(row: JsonDict | None) -> JsonDict | None:
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "node_type": row["node_type"],
+        "node_eid": row["node_eid"],
+        "num": row["num"],
+        "heading": row["heading"],
+        "depth": row["depth"],
+        "text": row["text"],
+    }
+
+
+def _node_changed(before: JsonDict, after: JsonDict) -> bool:
+    return any(
+        (before.get(key) or "") != (after.get(key) or "")
+        for key in ("node_type", "num", "heading", "normalized_text_hash")
+    )
 
 
 def _fts_phrase(query: str) -> str:
@@ -684,6 +836,166 @@ INDEX_HTML = """<!doctype html>
       padding: 10px;
     }
 
+    .document-view {
+      display: grid;
+      gap: 10px;
+    }
+
+    .document-node {
+      border-bottom: 1px solid #edf0f4;
+      padding: 0 0 10px;
+      cursor: pointer;
+    }
+
+    .document-node:last-child { border-bottom: 0; }
+    .document-node:hover .document-heading { color: var(--accent); }
+
+    .document-heading {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: baseline;
+      margin-bottom: 4px;
+      color: var(--text);
+    }
+
+    .document-type {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .document-num {
+      font-weight: 700;
+    }
+
+    .document-text {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .compare-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: end;
+      margin-bottom: 12px;
+    }
+
+    .field {
+      display: grid;
+      gap: 4px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .segmented {
+      display: inline-flex;
+      gap: 4px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px;
+      background: #fff;
+    }
+
+    .segmented button {
+      border: 0;
+      min-height: 28px;
+      border-radius: 4px;
+      padding: 4px 8px;
+    }
+
+    .diff-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .diff-row {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      margin-bottom: 10px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .diff-row.added { border-color: #9bd3ae; }
+    .diff-row.removed { border-color: #f0aaa6; }
+    .diff-row.modified { border-color: #e9c46a; }
+
+    .diff-heading {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: baseline;
+      padding: 8px 10px;
+      border-bottom: 1px solid #edf0f4;
+      background: #fbfcfd;
+    }
+
+    .diff-change {
+      border-radius: 999px;
+      padding: 1px 7px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #eef2f6;
+      color: var(--muted);
+    }
+
+    .diff-change.added { background: #e8f7ed; color: #177245; }
+    .diff-change.removed { background: #fff0ef; color: #b42318; }
+    .diff-change.modified { background: #fff7df; color: #855a04; }
+
+    .diff-body {
+      padding: 10px;
+    }
+
+    .diff-side-by-side {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 10px;
+    }
+
+    .diff-cell {
+      min-width: 0;
+    }
+
+    .diff-cell-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .diff-text {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .diff-text.added,
+    .diff-line.added { background: #edf9f1; }
+
+    .diff-text.removed,
+    .diff-line.removed { background: #fff1f0; }
+
+    .diff-line {
+      display: block;
+      min-height: 18px;
+      padding: 0 4px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
     .detail-grid {
       display: grid;
       grid-template-columns: 120px minmax(0, 1fr);
@@ -717,6 +1029,8 @@ INDEX_HTML = """<!doctype html>
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .split { grid-template-columns: 1fr; }
+      .compare-controls { grid-template-columns: 1fr; }
+      .diff-side-by-side { grid-template-columns: 1fr; }
       main { padding: 12px; }
     }
   </style>
@@ -762,6 +1076,8 @@ INDEX_HTML = """<!doctype html>
 
       <div class="tabs">
         <button data-view="nodes" class="active">Nodes</button>
+        <button data-view="document">Document</button>
+        <button data-view="diff">Diff</button>
         <button data-view="search">Search</button>
         <button data-view="revisions">Revisions</button>
         <button data-view="xml">AKN XML</button>
@@ -796,6 +1112,9 @@ INDEX_HTML = """<!doctype html>
       selectedExpression: null,
       view: 'nodes',
       searchQuery: '',
+      diffFromExpressionId: null,
+      diffToExpressionId: null,
+      diffMode: 'single',
     };
 
     const el = id => document.getElementById(id);
@@ -886,6 +1205,42 @@ INDEX_HTML = """<!doctype html>
       ], selectExpression, state.selectedExpression && state.selectedExpression.id);
     }
 
+    function expressionById(id) {
+      return state.expressions.find(expr => String(expr.id) === String(id)) || null;
+    }
+
+    function previousExpressionId(expressionId) {
+      const index = state.expressions.findIndex(expr => String(expr.id) === String(expressionId));
+      if (index > 0) return state.expressions[index - 1].id;
+      if (state.expressions.length > 1) return state.expressions[0].id;
+      return expressionId;
+    }
+
+    function ensureDiffDefaults() {
+      if (!state.expressions.length) {
+        state.diffFromExpressionId = null;
+        state.diffToExpressionId = null;
+        return;
+      }
+      if (!expressionById(state.diffToExpressionId)) {
+        state.diffToExpressionId = state.selectedExpression
+          ? state.selectedExpression.id
+          : state.expressions[state.expressions.length - 1].id;
+      }
+      if (!expressionById(state.diffFromExpressionId)) {
+        state.diffFromExpressionId = previousExpressionId(state.diffToExpressionId);
+      }
+      if (String(state.diffFromExpressionId) === String(state.diffToExpressionId) && state.expressions.length > 1) {
+        state.diffFromExpressionId = previousExpressionId(state.diffToExpressionId);
+      }
+    }
+
+    function expressionOptions(selectedId) {
+      return state.expressions.map(expr => (
+        `<option value="${escapeHtml(expr.id)}" ${String(expr.id) === String(selectedId) ? 'selected' : ''}>${escapeHtml(expr.version_label)} ${escapeHtml(expr.language)}</option>`
+      )).join('');
+    }
+
     async function loadInitial() {
       setStatus('Loading...');
       state.summary = await api('/api/summary');
@@ -906,6 +1261,8 @@ INDEX_HTML = """<!doctype html>
     async function selectWork(work) {
       state.selectedWork = work;
       state.selectedExpression = null;
+      state.diffFromExpressionId = null;
+      state.diffToExpressionId = null;
       state.expressions = (await api('/api/expressions', { work_id: work.id })).expressions;
       state.selectedExpression = state.expressions[state.expressions.length - 1] || null;
       renderSidebar();
@@ -914,6 +1271,10 @@ INDEX_HTML = """<!doctype html>
 
     async function selectExpression(expression) {
       state.selectedExpression = expression;
+      if (state.view === 'diff') {
+        state.diffToExpressionId = expression.id;
+        state.diffFromExpressionId = previousExpressionId(expression.id);
+      }
       renderSidebar();
       await renderView();
     }
@@ -921,6 +1282,8 @@ INDEX_HTML = """<!doctype html>
     async function renderView() {
       try {
         if (state.view === 'nodes') return renderNodes();
+        if (state.view === 'document') return renderDocument();
+        if (state.view === 'diff') return renderDiff();
         if (state.view === 'search') return renderSearch();
         if (state.view === 'revisions') return renderRevisions();
         if (state.view === 'xml') return renderXml();
@@ -945,6 +1308,190 @@ INDEX_HTML = """<!doctype html>
         { label: 'eId', value: row => row.node_eid },
         { label: 'Heading', value: row => row.heading || '' },
       ], payload.nodes, openNode);
+    }
+
+    async function renderDocument() {
+      el('listTitle').textContent = 'Document';
+      el('detail').innerHTML = '<div class="muted">Select a document node.</div>';
+      el('detailBadge').textContent = 'No selection';
+      if (!state.selectedExpression) {
+        el('list').innerHTML = '<div class="muted">No expression selected.</div>';
+        return;
+      }
+      const payload = await api('/api/document', { expression_id: state.selectedExpression.id, limit: 10000 });
+      if (!payload.document.length) {
+        el('list').innerHTML = '<div class="muted">No document nodes.</div>';
+        return;
+      }
+      el('list').innerHTML = `<div class="document-view">${payload.document.map(row => {
+        const depth = Math.max(0, Number(row.depth || 0));
+        const title = [row.num, row.heading].filter(Boolean).join(' ');
+        return `
+          <article class="document-node" data-node-id="${row.id}" style="padding-left:${Math.min(depth, 6) * 14}px">
+            <div class="document-heading">
+              <span class="document-type">${escapeHtml(row.node_type)}</span>
+              ${row.num ? `<span class="document-num">${escapeHtml(row.num)}</span>` : ''}
+              ${row.heading ? `<strong>${escapeHtml(row.heading)}</strong>` : ''}
+              ${!title ? `<span class="muted">${escapeHtml(row.node_eid)}</span>` : ''}
+            </div>
+            ${row.text ? `<p class="document-text">${escapeHtml(row.text)}</p>` : '<p class="muted document-text">No text.</p>'}
+          </article>
+        `;
+      }).join('')}</div>`;
+      document.querySelectorAll('[data-node-id]').forEach(article => {
+        article.addEventListener('click', () => openNode({ id: article.dataset.nodeId }));
+      });
+    }
+
+    async function renderDiff() {
+      el('listTitle').textContent = 'Document Diff';
+      el('detail').innerHTML = '<div class="muted">Select a changed node.</div>';
+      el('detailBadge').textContent = 'No selection';
+      if (state.expressions.length < 2) {
+        el('list').innerHTML = '<div class="muted">At least two expressions are required.</div>';
+        return;
+      }
+      ensureDiffDefaults();
+      const payload = await api('/api/document-diff', {
+        from_expression_id: state.diffFromExpressionId,
+        to_expression_id: state.diffToExpressionId,
+        limit: 10000,
+      });
+      const fromLabel = payload.from_expression.version_label;
+      const toLabel = payload.to_expression.version_label;
+      el('list').innerHTML = `
+        ${renderDiffControls()}
+        <div class="diff-summary">
+          <span class="badge">From ${escapeHtml(fromLabel)}</span>
+          <span class="badge">To ${escapeHtml(toLabel)}</span>
+          <span class="badge">+${escapeHtml(payload.stats.added)}</span>
+          <span class="badge">-${escapeHtml(payload.stats.removed)}</span>
+          <span class="badge">~${escapeHtml(payload.stats.modified)}</span>
+          <span class="badge">=${escapeHtml(payload.stats.unchanged)}</span>
+        </div>
+        <div>${payload.rows.map(row => (
+          state.diffMode === 'side-by-side'
+            ? renderSideBySideDiffRow(row, fromLabel, toLabel)
+            : renderSingleDiffRow(row)
+        )).join('')}</div>
+      `;
+      el('diffFrom').addEventListener('change', async event => {
+        state.diffFromExpressionId = Number(event.target.value);
+        await renderDiff();
+      });
+      el('diffTo').addEventListener('change', async event => {
+        state.diffToExpressionId = Number(event.target.value);
+        await renderDiff();
+      });
+      document.querySelectorAll('[data-diff-mode]').forEach(button => {
+        button.addEventListener('click', async () => {
+          state.diffMode = button.dataset.diffMode;
+          await renderDiff();
+        });
+      });
+      document.querySelectorAll('[data-open-node-id]').forEach(row => {
+        row.addEventListener('click', event => {
+          const target = event.target;
+          if (target && ['SELECT', 'BUTTON'].includes(target.tagName)) return;
+          openNode({ id: row.dataset.openNodeId });
+        });
+      });
+    }
+
+    function renderDiffControls() {
+      return `
+        <div class="compare-controls">
+          <div class="field">
+            <label for="diffFrom">From</label>
+            <select id="diffFrom">${expressionOptions(state.diffFromExpressionId)}</select>
+          </div>
+          <div class="field">
+            <label for="diffTo">To</label>
+            <select id="diffTo">${expressionOptions(state.diffToExpressionId)}</select>
+          </div>
+          <div class="field">
+            <label>View</label>
+            <div class="segmented">
+              <button data-diff-mode="single" class="${state.diffMode === 'single' ? 'active' : ''}">Single</button>
+              <button data-diff-mode="side-by-side" class="${state.diffMode === 'side-by-side' ? 'active' : ''}">Side-by-side</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderSingleDiffRow(row) {
+      const nodeId = (row.to && row.to.id) || (row.from && row.from.id) || '';
+      return `
+        <section class="diff-row ${escapeHtml(row.change_type)}" data-open-node-id="${escapeHtml(nodeId)}">
+          ${renderDiffHeading(row)}
+          <div class="diff-body">
+            ${row.change_type === 'modified' ? renderDiffLines(row.text_diff) : renderSingleNodeText(row)}
+          </div>
+        </section>
+      `;
+    }
+
+    function renderSideBySideDiffRow(row, fromLabel, toLabel) {
+      const nodeId = (row.to && row.to.id) || (row.from && row.from.id) || '';
+      return `
+        <section class="diff-row ${escapeHtml(row.change_type)}" data-open-node-id="${escapeHtml(nodeId)}">
+          ${renderDiffHeading(row)}
+          <div class="diff-body diff-side-by-side">
+            <div class="diff-cell">
+              <div class="diff-cell-title">${escapeHtml(fromLabel)}</div>
+              ${renderSideText(row.from, row.change_type === 'removed' || row.change_type === 'modified' ? 'removed' : '')}
+            </div>
+            <div class="diff-cell">
+              <div class="diff-cell-title">${escapeHtml(toLabel)}</div>
+              ${renderSideText(row.to, row.change_type === 'added' || row.change_type === 'modified' ? 'added' : '')}
+            </div>
+          </div>
+        </section>
+      `;
+    }
+
+    function renderDiffHeading(row) {
+      const title = [row.num, row.heading].filter(Boolean).join(' ') || row.node_eid || '';
+      return `
+        <div class="diff-heading">
+          <span class="diff-change ${escapeHtml(row.change_type)}">${escapeHtml(changeLabel(row.change_type))}</span>
+          <span class="document-type">${escapeHtml(row.node_type || '')}</span>
+          <strong>${escapeHtml(title)}</strong>
+          <span class="muted">${escapeHtml(row.node_eid || '')}</span>
+        </div>
+      `;
+    }
+
+    function renderSingleNodeText(row) {
+      if (row.change_type === 'added') return renderSideText(row.to, 'added');
+      if (row.change_type === 'removed') return renderSideText(row.from, 'removed');
+      return renderSideText(row.to || row.from, '');
+    }
+
+    function renderSideText(node, changeClass) {
+      if (!node) return '<div class="muted">No node.</div>';
+      return `<p class="diff-text ${escapeHtml(changeClass)}">${escapeHtml(node.text || '')}</p>`;
+    }
+
+    function renderDiffLines(diff) {
+      const lines = String(diff || '').split('\\n').filter(line => (
+        !line.startsWith('---') && !line.startsWith('+++') && !line.startsWith('@@')
+      ));
+      if (!lines.length) return '<div class="muted">Metadata changed.</div>';
+      return lines.map(line => {
+        const kind = line.startsWith('+') ? 'added' : (line.startsWith('-') ? 'removed' : '');
+        return `<span class="diff-line ${kind}">${escapeHtml(line || ' ')}</span>`;
+      }).join('');
+    }
+
+    function changeLabel(changeType) {
+      return {
+        added: 'Added',
+        removed: 'Removed',
+        modified: 'Modified',
+        unchanged: 'Unchanged',
+      }[changeType] || changeType;
     }
 
     async function openNode(row) {
