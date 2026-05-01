@@ -198,6 +198,7 @@ class BrowserStore:
         self,
         query: str,
         *,
+        scope: str = "all",
         work_id: str | None = None,
         expression_id: int | None = None,
         limit: int = 50,
@@ -205,9 +206,27 @@ class BrowserStore:
         query = query.strip()
         if not query:
             return []
+        scope = scope if scope in {"all", "text", "heading", "num", "eid"} else "all"
         with self.connect() as conn:
             params: list[Any]
-            if len(query) >= 3:
+            if scope != "all":
+                like = "%" + _escape_like(query) + "%"
+                field = {
+                    "text": "COALESCE(n.text, '')",
+                    "heading": "COALESCE(n.heading, '')",
+                    "num": "COALESCE(n.num, '')",
+                    "eid": "COALESCE(n.node_eid, '')",
+                }[scope]
+                sql = f"""
+                    SELECT n.id, n.expression_id, n.node_type, n.node_eid, n.num,
+                           n.heading, substr(COALESCE(n.text, ''), 1, 360) AS preview,
+                           e.work_id, e.version_label, 0.0 AS rank
+                    FROM nodes n
+                    JOIN expressions e ON e.id = n.expression_id
+                    WHERE {field} LIKE ? ESCAPE '\\'
+                """
+                params = [like]
+            elif len(query) >= 3:
                 sql = """
                     SELECT n.id, n.expression_id, n.node_type, n.node_eid, n.num,
                            n.heading, substr(COALESCE(n.text, ''), 1, 360) AS preview,
@@ -230,9 +249,10 @@ class BrowserStore:
                         COALESCE(n.heading, '') LIKE ? ESCAPE '\\'
                         OR COALESCE(n.text, '') LIKE ? ESCAPE '\\'
                         OR COALESCE(n.node_eid, '') LIKE ? ESCAPE '\\'
+                        OR COALESCE(n.num, '') LIKE ? ESCAPE '\\'
                     )
                 """
-                params = [like, like, like]
+                params = [like, like, like, like]
             if work_id:
                 sql += " AND e.work_id = ?"
                 params.append(work_id)
@@ -388,6 +408,7 @@ def make_handler(store: BrowserStore) -> type[BaseHTTPRequestHandler]:
                         {
                             "results": store.search(
                                 _required(query, "q"),
+                                scope=_optional(query, "scope") or "all",
                                 work_id=_optional(query, "work_id"),
                                 expression_id=_int_optional(query, "expression_id"),
                                 limit=_int(query, "limit", 50),
@@ -627,11 +648,12 @@ def _int(query: dict[str, list[str]], key: str, default: int) -> int:
 
 
 INDEX_HTML = """<!doctype html>
-<html lang="en">
+<html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UCDB Browser</title>
+  <link rel="icon" href="data:,">
+  <title>UCDB 法規瀏覽器</title>
   <style>
     :root {
       color-scheme: light;
@@ -660,6 +682,8 @@ INDEX_HTML = """<!doctype html>
       font-size: 14px;
       line-height: 1.45;
     }
+
+    a { color: var(--accent); }
 
     button, input, select {
       font: inherit;
@@ -693,7 +717,7 @@ INDEX_HTML = """<!doctype html>
 
     .app {
       display: grid;
-      grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+      grid-template-columns: minmax(340px, 390px) minmax(0, 1fr);
       min-height: 100vh;
     }
 
@@ -708,7 +732,7 @@ INDEX_HTML = """<!doctype html>
       min-width: 0;
       padding: 18px;
       display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr);
+      grid-template-rows: auto auto auto minmax(0, 1fr);
       gap: 14px;
     }
 
@@ -735,7 +759,7 @@ INDEX_HTML = """<!doctype html>
 
     .summary {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
       margin-bottom: 16px;
     }
@@ -754,9 +778,10 @@ INDEX_HTML = """<!doctype html>
     }
 
     .stack { display: grid; gap: 10px; }
+
     .toolbar {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
+      grid-template-columns: minmax(0, 1fr) minmax(130px, 170px) auto auto;
       gap: 8px;
       align-items: center;
     }
@@ -792,9 +817,20 @@ INDEX_HTML = """<!doctype html>
 
     .split {
       display: grid;
-      grid-template-columns: minmax(320px, .9fr) minmax(0, 1.3fr);
+      grid-template-columns: minmax(0, 1fr);
       gap: 14px;
       min-height: 0;
+    }
+
+    .split.detail-open {
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+    }
+
+    .detail-panel { display: none; }
+    .split.detail-open .detail-panel { display: block; }
+
+    .detail-panel .panel-body {
+      max-height: calc(100vh - 190px);
     }
 
     table {
@@ -808,7 +844,7 @@ INDEX_HTML = """<!doctype html>
       border-bottom: 1px solid #edf0f4;
       padding: 8px;
       vertical-align: top;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
     }
 
     th {
@@ -822,7 +858,13 @@ INDEX_HTML = """<!doctype html>
     }
 
     tr[data-clickable="true"] { cursor: pointer; }
-    tr[data-clickable="true"]:hover { background: #f6fbfa; }
+    tr[data-clickable="true"]:hover,
+    tr[data-clickable="true"]:focus { background: #f6fbfa; outline: 0; }
+    tr.active { background: var(--accent-soft); }
+
+    .node-table th:nth-child(1) { width: 72px; }
+    .node-table th:nth-child(2) { width: 110px; }
+    .node-table th:nth-child(3) { width: 110px; }
 
     pre {
       margin: 0;
@@ -836,19 +878,130 @@ INDEX_HTML = """<!doctype html>
       padding: 10px;
     }
 
+    .context-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .context-current {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .empty-state {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      color: var(--muted);
+      background: #fbfcfd;
+      margin-bottom: 12px;
+    }
+
+    .empty-state strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .side-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .side-item {
+      width: 100%;
+      min-height: 0;
+      text-align: left;
+      border: 1px solid transparent;
+      background: transparent;
+      padding: 8px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .side-item:hover {
+      background: #f6fbfa;
+      border-color: var(--line);
+    }
+
+    .side-item.active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    .side-title {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .side-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     .document-view {
       display: grid;
-      gap: 10px;
+      grid-template-columns: minmax(170px, 230px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .document-toc {
+      position: sticky;
+      top: 0;
+      display: grid;
+      gap: 4px;
+      max-height: calc(100vh - 190px);
+      overflow: auto;
+      border-right: 1px solid var(--line);
+      padding-right: 10px;
+    }
+
+    .toc-link {
+      border: 0;
+      min-height: 28px;
+      border-radius: 4px;
+      padding: 4px 6px;
+      text-align: left;
+      color: var(--muted);
+      background: transparent;
+      overflow-wrap: anywhere;
+    }
+
+    .toc-link:hover { color: var(--accent); background: #f6fbfa; }
+
+    .document-content {
+      display: grid;
+      gap: 12px;
     }
 
     .document-node {
       border-bottom: 1px solid #edf0f4;
-      padding: 0 0 10px;
+      padding: 0 0 12px;
       cursor: pointer;
     }
 
     .document-node:last-child { border-bottom: 0; }
-    .document-node:hover .document-heading { color: var(--accent); }
+    .document-node:hover .document-heading,
+    .document-node.active .document-heading { color: var(--accent); }
+
+    .document-node.kind-chapter {
+      margin-top: 8px;
+      padding-top: 10px;
+      border-top: 2px solid var(--line);
+    }
+
+    .document-node.kind-article {
+      padding-top: 6px;
+    }
 
     .document-heading {
       display: flex;
@@ -859,10 +1012,19 @@ INDEX_HTML = """<!doctype html>
       color: var(--text);
     }
 
+    .kind-chapter .document-heading {
+      font-size: 18px;
+      margin-bottom: 8px;
+    }
+
+    .kind-article .document-heading {
+      font-size: 16px;
+      margin-bottom: 7px;
+    }
+
     .document-type {
       color: var(--muted);
       font-size: 12px;
-      text-transform: uppercase;
       letter-spacing: 0;
     }
 
@@ -874,11 +1036,13 @@ INDEX_HTML = """<!doctype html>
       margin: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      font-size: 15px;
+      line-height: 1.75;
     }
 
     .compare-controls {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
       gap: 8px;
       align-items: end;
       margin-bottom: 12px;
@@ -912,14 +1076,27 @@ INDEX_HTML = """<!doctype html>
     }
 
     .diff-summary {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
       gap: 6px;
       margin-bottom: 12px;
     }
 
+    .summary-pill {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+    }
+
+    .summary-pill strong {
+      display: block;
+      font-size: 18px;
+    }
+
     .diff-row {
       border: 1px solid var(--line);
+      border-left-width: 4px;
       border-radius: 6px;
       margin-bottom: 10px;
       overflow: hidden;
@@ -938,6 +1115,7 @@ INDEX_HTML = """<!doctype html>
       padding: 8px 10px;
       border-bottom: 1px solid #edf0f4;
       background: #fbfcfd;
+      cursor: pointer;
     }
 
     .diff-change {
@@ -952,6 +1130,13 @@ INDEX_HTML = """<!doctype html>
     .diff-change.added { background: #e8f7ed; color: #177245; }
     .diff-change.removed { background: #fff0ef; color: #b42318; }
     .diff-change.modified { background: #fff7df; color: #855a04; }
+
+    .diff-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 0 0 12px;
+    }
 
     .diff-body {
       padding: 10px;
@@ -996,6 +1181,23 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
     }
 
+    .diff-line.added::before { content: "+ "; font-weight: 700; }
+    .diff-line.removed::before { content: "- "; font-weight: 700; }
+
+    .inline-diff {
+      border-radius: 3px;
+      padding: 0 2px;
+      font-weight: 700;
+    }
+
+    .inline-diff.added {
+      background: #bcebd0;
+    }
+
+    .inline-diff.removed {
+      background: #ffd0cc;
+    }
+
     .detail-grid {
       display: grid;
       grid-template-columns: 120px minmax(0, 1fr);
@@ -1016,6 +1218,13 @@ INDEX_HTML = """<!doctype html>
       overflow-wrap: anywhere;
     }
 
+    .copy-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
     .status {
       min-height: 20px;
       color: var(--muted);
@@ -1028,9 +1237,20 @@ INDEX_HTML = """<!doctype html>
       .app { grid-template-columns: 1fr; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .split { grid-template-columns: 1fr; }
+      .split,
+      .split.detail-open,
+      .document-view { grid-template-columns: 1fr; }
       .compare-controls { grid-template-columns: 1fr; }
       .diff-side-by-side { grid-template-columns: 1fr; }
+      .diff-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { grid-template-columns: 1fr; }
+      .document-toc {
+        position: static;
+        max-height: 180px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        padding: 0 0 10px;
+      }
       main { padding: 12px; }
     }
   </style>
@@ -1040,10 +1260,10 @@ INDEX_HTML = """<!doctype html>
     <aside>
       <div class="topline">
         <div>
-          <h1>UCDB Browser</h1>
-          <div class="muted">Akoma Ntoso SQLite</div>
+          <h1>UCDB 法規瀏覽器</h1>
+          <div class="muted">SQLite 法規版本資料庫</div>
         </div>
-        <button id="refreshBtn" title="Reload database metadata">Reload</button>
+        <button id="refreshBtn" title="重新讀取資料庫">重新整理</button>
       </div>
 
       <div class="summary" id="summary"></div>
@@ -1051,7 +1271,7 @@ INDEX_HTML = """<!doctype html>
       <div class="stack">
         <div class="panel">
           <div class="panel-head">
-            <h2>Works</h2>
+            <h2>法規集</h2>
             <span class="badge" id="workCount">0</span>
           </div>
           <div class="panel-body" id="works"></div>
@@ -1059,7 +1279,7 @@ INDEX_HTML = """<!doctype html>
 
         <div class="panel">
           <div class="panel-head">
-            <h2>Expressions</h2>
+            <h2>版本</h2>
             <span class="badge" id="exprCount">0</span>
           </div>
           <div class="panel-body" id="expressions"></div>
@@ -1068,19 +1288,27 @@ INDEX_HTML = """<!doctype html>
     </aside>
 
     <main>
+      <div class="context-bar" id="contextBar"></div>
       <div class="toolbar">
-        <input id="searchInput" placeholder="Search heading, text, or eId">
-        <button id="searchBtn">Search</button>
-        <button id="clearBtn">Clear</button>
+        <input id="searchInput" placeholder="搜尋目前版本的全文、標題、條號或節點 ID">
+        <select id="searchScope" title="搜尋範圍">
+          <option value="all">全文 / 標題 / 條號 / 節點 ID</option>
+          <option value="text">全文</option>
+          <option value="heading">標題</option>
+          <option value="num">條號</option>
+          <option value="eid">節點 ID</option>
+        </select>
+        <button id="searchBtn">搜尋</button>
+        <button id="clearBtn">清除</button>
       </div>
 
       <div class="tabs">
-        <button data-view="nodes" class="active">Nodes</button>
-        <button data-view="document">Document</button>
-        <button data-view="diff">Diff</button>
-        <button data-view="search">Search</button>
-        <button data-view="revisions">Revisions</button>
-        <button data-view="xml">AKN XML</button>
+        <button data-view="nodes" class="active">節點</button>
+        <button data-view="document">文件</button>
+        <button data-view="diff">差異</button>
+        <button data-view="search">搜尋</button>
+        <button data-view="revisions">修訂紀錄</button>
+        <button data-view="xml">原始 XML</button>
       </div>
 
       <div class="split">
@@ -1092,9 +1320,9 @@ INDEX_HTML = """<!doctype html>
           <div class="panel-body" id="list"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel detail-panel" id="detailPanel">
           <div class="panel-head">
-            <h2>Detail</h2>
+            <h2>詳細資料</h2>
             <span class="badge" id="detailBadge">No selection</span>
           </div>
           <div class="panel-body" id="detail"></div>
@@ -1112,9 +1340,12 @@ INDEX_HTML = """<!doctype html>
       selectedExpression: null,
       view: 'nodes',
       searchQuery: '',
+      searchScope: 'all',
       diffFromExpressionId: null,
       diffToExpressionId: null,
       diffMode: 'single',
+      diffOnlyChanged: true,
+      selectedNodeId: null,
     };
 
     const el = id => document.getElementById(id);
@@ -1145,46 +1376,121 @@ INDEX_HTML = """<!doctype html>
       })[char]);
     }
 
-    function table(columns, rows, onClick) {
-      if (!rows.length) return '<div class="muted">No rows.</div>';
+    function nodeTypeLabel(type) {
+      return {
+        attachment: '沿革 / 附件',
+        chapter: '章節',
+        article: '條文',
+        paragraph: '項',
+        point: '款',
+        subpoint: '目',
+        item: '項目',
+      }[String(type || '').toLowerCase()] || String(type || '');
+    }
+
+    function changeLabel(changeType) {
+      return {
+        added: '新增',
+        removed: '刪除',
+        modified: '修改',
+        unchanged: '未變更',
+      }[changeType] || changeType;
+    }
+
+    function changeIcon(changeType) {
+      return {
+        added: '+',
+        removed: '-',
+        modified: '±',
+        unchanged: '=',
+      }[changeType] || '';
+    }
+
+    function languageLabel(language) {
+      return { zho: '繁中', eng: '英文' }[String(language || '').toLowerCase()] || language || '';
+    }
+
+    function setDetailEmpty() {
+      el('detailBadge').textContent = '未選取';
+      el('detail').innerHTML = '';
+      document.querySelector('.split').classList.remove('detail-open');
+      state.selectedNodeId = null;
+    }
+
+    function openDetail() {
+      document.querySelector('.split').classList.add('detail-open');
+    }
+
+    function renderContext() {
+      const work = state.selectedWork ? state.selectedWork.id : '未選取法規集';
+      const expr = state.selectedExpression
+        ? `${state.selectedExpression.version_label} ${languageLabel(state.selectedExpression.language)}`
+        : '未選取版本';
+      const view = {
+        nodes: '節點',
+        document: '文件',
+        diff: '差異',
+        search: '搜尋',
+        revisions: '修訂紀錄',
+        xml: '原始 XML',
+      }[state.view] || state.view;
+      el('contextBar').innerHTML = `
+        <span>${escapeHtml(work)}</span>
+        <span>/</span>
+        <span>${escapeHtml(expr)}</span>
+        <span>/</span>
+        <span class="context-current">${escapeHtml(view)}</span>
+      `;
+    }
+
+    function table(columns, rows, onClick, options = {}) {
+      if (!rows.length) return '<div class="muted">沒有資料。</div>';
       const head = columns.map(col => `<th>${escapeHtml(col.label)}</th>`).join('');
       const body = rows.map((row, index) => {
         const cells = columns.map(col => `<td>${escapeHtml(col.value(row))}</td>`).join('');
-        return `<tr data-index="${index}" data-clickable="${onClick ? 'true' : 'false'}">${cells}</tr>`;
+        const active = options.selectedId && String(row.id) === String(options.selectedId);
+        return `<tr tabindex="${onClick ? '0' : '-1'}" data-index="${index}" data-clickable="${onClick ? 'true' : 'false'}" class="${active ? 'active' : ''}">${cells}</tr>`;
       }).join('');
       setTimeout(() => {
         if (!onClick) return;
         document.querySelectorAll('#list tr[data-index]').forEach(tr => {
-          tr.addEventListener('click', () => onClick(rows[Number(tr.dataset.index)]));
+          const activate = () => {
+            document.querySelectorAll('#list tr.active').forEach(row => row.classList.remove('active'));
+            tr.classList.add('active');
+            onClick(rows[Number(tr.dataset.index)]);
+          };
+          tr.addEventListener('click', activate);
+          tr.addEventListener('keydown', event => {
+            if (event.key === 'Enter') activate();
+          });
         });
       }, 0);
-      return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+      return `<table class="${escapeHtml(options.className || '')}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
     }
 
-    function sideTable(rootId, rows, columns, onClick, selectedId) {
+    function sideList(rootId, rows, renderRow, onClick, selectedId) {
       const root = el(rootId);
       if (!rows.length) {
-        root.innerHTML = '<div class="muted">No rows.</div>';
+        root.innerHTML = '<div class="muted">沒有資料。</div>';
         return;
       }
-      root.innerHTML = '<table><tbody>' + rows.map((row, index) => {
+      root.innerHTML = '<div class="side-list">' + rows.map((row, index) => {
         const selected = selectedId !== null && selectedId === row.id;
-        const cells = columns.map(col => `<td>${escapeHtml(col.value(row))}</td>`).join('');
-        return `<tr data-index="${index}" data-clickable="true" class="${selected ? 'active' : ''}">${cells}</tr>`;
-      }).join('') + '</tbody></table>';
-      root.querySelectorAll('tr[data-index]').forEach(tr => {
-        tr.addEventListener('click', () => onClick(rows[Number(tr.dataset.index)]));
+        return `<button class="side-item ${selected ? 'active' : ''}" data-index="${index}">${renderRow(row)}</button>`;
+      }).join('') + '</div>';
+      root.querySelectorAll('[data-index]').forEach(item => {
+        item.addEventListener('click', () => onClick(rows[Number(item.dataset.index)]));
       });
     }
 
     function renderSummary() {
       const summary = state.summary || {};
       const metrics = [
-        ['Works', summary.works],
-        ['Expressions', summary.expressions],
-        ['Nodes', summary.nodes],
-        ['Revisions', summary.revisions],
-        ['Changes', summary.changes],
+        ['法規集', summary.works],
+        ['版本', summary.expressions],
+        ['條文節點', summary.nodes],
+        ['修訂紀錄', summary.revisions],
+        ['變更', summary.changes],
       ];
       el('summary').innerHTML = metrics.map(([label, value]) => (
         `<div class="metric"><strong>${escapeHtml(value ?? 0)}</strong><span class="muted">${label}</span></div>`
@@ -1194,15 +1500,21 @@ INDEX_HTML = """<!doctype html>
     function renderSidebar() {
       el('workCount').textContent = state.works.length;
       el('exprCount').textContent = state.expressions.length;
-      sideTable('works', state.works, [
-        { label: 'Work', value: row => row.id },
-        { label: 'Count', value: row => row.expression_count },
-      ], selectWork, state.selectedWork && state.selectedWork.id);
-      sideTable('expressions', state.expressions, [
-        { label: 'Version', value: row => row.version_label },
-        { label: 'Lang', value: row => row.language },
-        { label: 'Nodes', value: row => row.node_count },
-      ], selectExpression, state.selectedExpression && state.selectedExpression.id);
+      sideList('works', state.works, row => `
+        <span class="side-title">${escapeHtml(row.id)}</span>
+        <span class="side-meta">
+          <span>${escapeHtml(row.expression_count)} 個版本</span>
+          <span>${escapeHtml(row.node_count)} 個節點</span>
+        </span>
+      `, selectWork, state.selectedWork && state.selectedWork.id);
+      sideList('expressions', state.expressions, row => `
+        <span class="side-title">${escapeHtml(row.version_label)}</span>
+        <span class="side-meta">
+          <span>${escapeHtml(languageLabel(row.language))}</span>
+          <span>${escapeHtml(row.node_count)} 個節點</span>
+        </span>
+      `, selectExpression, state.selectedExpression && state.selectedExpression.id);
+      renderContext();
     }
 
     function expressionById(id) {
@@ -1261,6 +1573,7 @@ INDEX_HTML = """<!doctype html>
     async function selectWork(work) {
       state.selectedWork = work;
       state.selectedExpression = null;
+      state.selectedNodeId = null;
       state.diffFromExpressionId = null;
       state.diffToExpressionId = null;
       state.expressions = (await api('/api/expressions', { work_id: work.id })).expressions;
@@ -1271,6 +1584,7 @@ INDEX_HTML = """<!doctype html>
 
     async function selectExpression(expression) {
       state.selectedExpression = expression;
+      state.selectedNodeId = null;
       if (state.view === 'diff') {
         state.diffToExpressionId = expression.id;
         state.diffFromExpressionId = previousExpressionId(expression.id);
@@ -1281,6 +1595,7 @@ INDEX_HTML = """<!doctype html>
 
     async function renderView() {
       try {
+        renderContext();
         if (state.view === 'nodes') return renderNodes();
         if (state.view === 'document') return renderDocument();
         if (state.view === 'diff') return renderDiff();
@@ -1293,62 +1608,84 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function renderNodes() {
-      el('listTitle').textContent = 'Nodes';
-      el('detail').innerHTML = '<div class="muted">Select a node.</div>';
-      el('detailBadge').textContent = 'No selection';
+      el('listTitle').textContent = '節點';
+      setDetailEmpty();
       if (!state.selectedExpression) {
-        el('list').innerHTML = '<div class="muted">No expression selected.</div>';
+        el('list').innerHTML = '<div class="muted">尚未選取版本。</div>';
         return;
       }
       const payload = await api('/api/nodes', { expression_id: state.selectedExpression.id, limit: 2000 });
-      el('list').innerHTML = table([
-        { label: 'Order', value: row => row.ordering },
-        { label: 'Type', value: row => row.node_type },
-        { label: 'Num', value: row => row.num || '' },
-        { label: 'eId', value: row => row.node_eid },
-        { label: 'Heading', value: row => row.heading || '' },
-      ], payload.nodes, openNode);
+      el('list').innerHTML = `
+        <div class="empty-state">
+          <strong>點選任一列查看詳細資料。</strong>
+          詳細資料會顯示條文文字、節點 ID、版本紀錄與逐行來源；主表格保留較適合瀏覽的欄位。
+        </div>
+        ${table([
+          { label: '順序', value: row => row.ordering },
+          { label: '類型', value: row => nodeTypeLabel(row.node_type) },
+          { label: '條號', value: row => row.num || '' },
+          { label: '標題 / 摘要', value: row => row.heading || row.preview || '' },
+        ], payload.nodes, openNode, { className: 'node-table', selectedId: state.selectedNodeId })}
+      `;
     }
 
     async function renderDocument() {
-      el('listTitle').textContent = 'Document';
-      el('detail').innerHTML = '<div class="muted">Select a document node.</div>';
-      el('detailBadge').textContent = 'No selection';
+      el('listTitle').textContent = '文件閱讀';
+      setDetailEmpty();
       if (!state.selectedExpression) {
-        el('list').innerHTML = '<div class="muted">No expression selected.</div>';
+        el('list').innerHTML = '<div class="muted">尚未選取版本。</div>';
         return;
       }
       const payload = await api('/api/document', { expression_id: state.selectedExpression.id, limit: 10000 });
       if (!payload.document.length) {
-        el('list').innerHTML = '<div class="muted">No document nodes.</div>';
+        el('list').innerHTML = '<div class="muted">此版本沒有文件節點。</div>';
         return;
       }
-      el('list').innerHTML = `<div class="document-view">${payload.document.map(row => {
+      const tocRows = payload.document.filter(row => ['chapter', 'article'].includes(String(row.node_type).toLowerCase()));
+      el('list').innerHTML = `<div class="document-view">
+        <nav class="document-toc" aria-label="條文目錄">
+          ${tocRows.map(row => {
+            const title = [row.num, row.heading].filter(Boolean).join(' ') || row.node_eid;
+            return `<button class="toc-link" data-toc-node-id="${escapeHtml(row.id)}">${escapeHtml(title)}</button>`;
+          }).join('')}
+        </nav>
+        <div class="document-content">${payload.document.map(row => {
         const depth = Math.max(0, Number(row.depth || 0));
         const title = [row.num, row.heading].filter(Boolean).join(' ');
+        const kind = `kind-${String(row.node_type || '').toLowerCase()}`;
+        const showLabel = !['chapter', 'article', 'paragraph', 'point'].includes(String(row.node_type || '').toLowerCase());
         return `
-          <article class="document-node" data-node-id="${row.id}" style="padding-left:${Math.min(depth, 6) * 14}px">
+          <article class="document-node ${escapeHtml(kind)}" data-node-id="${row.id}" style="padding-left:${Math.min(depth, 6) * 14}px">
             <div class="document-heading">
-              <span class="document-type">${escapeHtml(row.node_type)}</span>
+              ${showLabel ? `<span class="document-type">${escapeHtml(nodeTypeLabel(row.node_type))}</span>` : ''}
               ${row.num ? `<span class="document-num">${escapeHtml(row.num)}</span>` : ''}
               ${row.heading ? `<strong>${escapeHtml(row.heading)}</strong>` : ''}
               ${!title ? `<span class="muted">${escapeHtml(row.node_eid)}</span>` : ''}
             </div>
-            ${row.text ? `<p class="document-text">${escapeHtml(row.text)}</p>` : '<p class="muted document-text">No text.</p>'}
+            ${row.text ? `<p class="document-text">${escapeHtml(row.text)}</p>` : ''}
           </article>
         `;
-      }).join('')}</div>`;
+      }).join('')}</div></div>`;
       document.querySelectorAll('[data-node-id]').forEach(article => {
-        article.addEventListener('click', () => openNode({ id: article.dataset.nodeId }));
+        article.addEventListener('click', () => {
+          document.querySelectorAll('.document-node.active').forEach(node => node.classList.remove('active'));
+          article.classList.add('active');
+          openNode({ id: article.dataset.nodeId });
+        });
+      });
+      document.querySelectorAll('[data-toc-node-id]').forEach(link => {
+        link.addEventListener('click', () => {
+          const target = document.querySelector(`[data-node-id="${CSS.escape(link.dataset.tocNodeId)}"]`);
+          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
       });
     }
 
     async function renderDiff() {
-      el('listTitle').textContent = 'Document Diff';
-      el('detail').innerHTML = '<div class="muted">Select a changed node.</div>';
-      el('detailBadge').textContent = 'No selection';
+      el('listTitle').textContent = '版本差異';
+      setDetailEmpty();
       if (state.expressions.length < 2) {
-        el('list').innerHTML = '<div class="muted">At least two expressions are required.</div>';
+        el('list').innerHTML = '<div class="muted">至少需要兩個版本才能比對。</div>';
         return;
       }
       ensureDiffDefaults();
@@ -1359,20 +1696,27 @@ INDEX_HTML = """<!doctype html>
       });
       const fromLabel = payload.from_expression.version_label;
       const toLabel = payload.to_expression.version_label;
+      const changedRows = payload.rows.filter(row => row.change_type !== 'unchanged');
+      const visibleRows = state.diffOnlyChanged ? changedRows : payload.rows;
+      const changedTotal = payload.stats.added + payload.stats.removed + payload.stats.modified;
       el('list').innerHTML = `
         ${renderDiffControls()}
         <div class="diff-summary">
-          <span class="badge">From ${escapeHtml(fromLabel)}</span>
-          <span class="badge">To ${escapeHtml(toLabel)}</span>
-          <span class="badge">+${escapeHtml(payload.stats.added)}</span>
-          <span class="badge">-${escapeHtml(payload.stats.removed)}</span>
-          <span class="badge">~${escapeHtml(payload.stats.modified)}</span>
-          <span class="badge">=${escapeHtml(payload.stats.unchanged)}</span>
+          <div class="summary-pill"><strong>${escapeHtml(payload.stats.added)}</strong><span class="muted">新增節點</span></div>
+          <div class="summary-pill"><strong>${escapeHtml(payload.stats.removed)}</strong><span class="muted">刪除節點</span></div>
+          <div class="summary-pill"><strong>${escapeHtml(payload.stats.modified)}</strong><span class="muted">修改節點</span></div>
+          <div class="summary-pill"><strong>${escapeHtml(payload.stats.unchanged)}</strong><span class="muted">未變更節點</span></div>
         </div>
-        <div>${payload.rows.map(row => (
+        <div class="diff-actions">
+          <span class="badge">${escapeHtml(fromLabel)} → ${escapeHtml(toLabel)}</span>
+          <span class="badge">共 ${escapeHtml(changedTotal)} 處變更</span>
+          <button id="prevChangeBtn">上一個變更</button>
+          <button id="nextChangeBtn">下一個變更</button>
+        </div>
+        <div>${visibleRows.map((row, index) => (
           state.diffMode === 'side-by-side'
-            ? renderSideBySideDiffRow(row, fromLabel, toLabel)
-            : renderSingleDiffRow(row)
+            ? renderSideBySideDiffRow(row, fromLabel, toLabel, index)
+            : renderSingleDiffRow(row, index)
         )).join('')}</div>
       `;
       el('diffFrom').addEventListener('change', async event => {
@@ -1389,10 +1733,17 @@ INDEX_HTML = """<!doctype html>
           await renderDiff();
         });
       });
+      el('diffOnlyChanged').addEventListener('change', async event => {
+        state.diffOnlyChanged = event.target.checked;
+        state.currentChangeIndex = 0;
+        await renderDiff();
+      });
+      el('prevChangeBtn').addEventListener('click', () => jumpChange(-1));
+      el('nextChangeBtn').addEventListener('click', () => jumpChange(1));
       document.querySelectorAll('[data-open-node-id]').forEach(row => {
         row.addEventListener('click', event => {
           const target = event.target;
-          if (target && ['SELECT', 'BUTTON'].includes(target.tagName)) return;
+          if (target && (['SELECT', 'BUTTON'].includes(target.tagName) || target.closest('summary'))) return;
           openNode({ id: row.dataset.openNodeId });
         });
       });
@@ -1402,41 +1753,47 @@ INDEX_HTML = """<!doctype html>
       return `
         <div class="compare-controls">
           <div class="field">
-            <label for="diffFrom">From</label>
+            <label for="diffFrom">來源版本</label>
             <select id="diffFrom">${expressionOptions(state.diffFromExpressionId)}</select>
           </div>
           <div class="field">
-            <label for="diffTo">To</label>
+            <label for="diffTo">目標版本</label>
             <select id="diffTo">${expressionOptions(state.diffToExpressionId)}</select>
           </div>
           <div class="field">
-            <label>View</label>
+            <label>檢視</label>
             <div class="segmented">
-              <button data-diff-mode="single" class="${state.diffMode === 'single' ? 'active' : ''}">Single</button>
-              <button data-diff-mode="side-by-side" class="${state.diffMode === 'side-by-side' ? 'active' : ''}">Side-by-side</button>
+              <button data-diff-mode="single" class="${state.diffMode === 'single' ? 'active' : ''}">單欄</button>
+              <button data-diff-mode="side-by-side" class="${state.diffMode === 'side-by-side' ? 'active' : ''}">左右比對</button>
             </div>
+          </div>
+          <div class="field">
+            <label>篩選</label>
+            <label class="badge"><input id="diffOnlyChanged" type="checkbox" ${state.diffOnlyChanged ? 'checked' : ''} style="width:auto; min-height:0; margin-right:6px">只看變更</label>
           </div>
         </div>
       `;
     }
 
-    function renderSingleDiffRow(row) {
+    function renderSingleDiffRow(row, index) {
       const nodeId = (row.to && row.to.id) || (row.from && row.from.id) || '';
+      const open = row.change_type !== 'unchanged' ? 'open' : '';
       return `
-        <section class="diff-row ${escapeHtml(row.change_type)}" data-open-node-id="${escapeHtml(nodeId)}">
-          ${renderDiffHeading(row)}
+        <details class="diff-row ${escapeHtml(row.change_type)}" data-change-index="${index}" data-open-node-id="${escapeHtml(nodeId)}" ${open}>
+          <summary class="diff-heading">${renderDiffHeadingContent(row)}</summary>
           <div class="diff-body">
             ${row.change_type === 'modified' ? renderDiffLines(row.text_diff) : renderSingleNodeText(row)}
           </div>
-        </section>
+        </details>
       `;
     }
 
-    function renderSideBySideDiffRow(row, fromLabel, toLabel) {
+    function renderSideBySideDiffRow(row, fromLabel, toLabel, index) {
       const nodeId = (row.to && row.to.id) || (row.from && row.from.id) || '';
+      const open = row.change_type !== 'unchanged' ? 'open' : '';
       return `
-        <section class="diff-row ${escapeHtml(row.change_type)}" data-open-node-id="${escapeHtml(nodeId)}">
-          ${renderDiffHeading(row)}
+        <details class="diff-row ${escapeHtml(row.change_type)}" data-change-index="${index}" data-open-node-id="${escapeHtml(nodeId)}" ${open}>
+          <summary class="diff-heading">${renderDiffHeadingContent(row)}</summary>
           <div class="diff-body diff-side-by-side">
             <div class="diff-cell">
               <div class="diff-cell-title">${escapeHtml(fromLabel)}</div>
@@ -1447,19 +1804,17 @@ INDEX_HTML = """<!doctype html>
               ${renderSideText(row.to, row.change_type === 'added' || row.change_type === 'modified' ? 'added' : '')}
             </div>
           </div>
-        </section>
+        </details>
       `;
     }
 
-    function renderDiffHeading(row) {
+    function renderDiffHeadingContent(row) {
       const title = [row.num, row.heading].filter(Boolean).join(' ') || row.node_eid || '';
       return `
-        <div class="diff-heading">
-          <span class="diff-change ${escapeHtml(row.change_type)}">${escapeHtml(changeLabel(row.change_type))}</span>
-          <span class="document-type">${escapeHtml(row.node_type || '')}</span>
+          <span class="diff-change ${escapeHtml(row.change_type)}">${escapeHtml(changeIcon(row.change_type))} ${escapeHtml(changeLabel(row.change_type))}</span>
+          <span class="document-type">${escapeHtml(nodeTypeLabel(row.node_type))}</span>
           <strong>${escapeHtml(title)}</strong>
           <span class="muted">${escapeHtml(row.node_eid || '')}</span>
-        </div>
       `;
     }
 
@@ -1470,7 +1825,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderSideText(node, changeClass) {
-      if (!node) return '<div class="muted">No node.</div>';
+      if (!node) return '<div class="muted">此側沒有對應節點。</div>';
       return `<p class="diff-text ${escapeHtml(changeClass)}">${escapeHtml(node.text || '')}</p>`;
     }
 
@@ -1478,96 +1833,266 @@ INDEX_HTML = """<!doctype html>
       const lines = String(diff || '').split('\\n').filter(line => (
         !line.startsWith('---') && !line.startsWith('+++') && !line.startsWith('@@')
       ));
-      if (!lines.length) return '<div class="muted">Metadata changed.</div>';
-      return lines.map(line => {
-        const kind = line.startsWith('+') ? 'added' : (line.startsWith('-') ? 'removed' : '');
-        return `<span class="diff-line ${kind}">${escapeHtml(line || ' ')}</span>`;
-      }).join('');
+      if (!lines.length) return '<div class="muted">只有中繼資料變更。</div>';
+      const rendered = [];
+      for (let index = 0; index < lines.length;) {
+        if (!lines[index].startsWith('-')) {
+          rendered.push(renderPlainDiffLine(lines[index]));
+          index += 1;
+          continue;
+        }
+
+        const removed = [];
+        while (index < lines.length && lines[index].startsWith('-')) {
+          removed.push(lines[index].slice(1));
+          index += 1;
+        }
+
+        const added = [];
+        while (index < lines.length && lines[index].startsWith('+')) {
+          added.push(lines[index].slice(1));
+          index += 1;
+        }
+
+        if (!added.length) {
+          rendered.push(...removed.map(line => renderDiffLineHtml('removed', escapeHtml(line || ' '))));
+          continue;
+        }
+
+        const count = Math.max(removed.length, added.length);
+        for (let offset = 0; offset < count; offset += 1) {
+          const before = removed[offset];
+          const after = added[offset];
+          if (before !== undefined && after !== undefined) {
+            const pair = inlineDiffHtml(before, after);
+            rendered.push(renderDiffLineHtml('removed', pair.before || ' '));
+            rendered.push(renderDiffLineHtml('added', pair.after || ' '));
+          } else if (before !== undefined) {
+            rendered.push(renderDiffLineHtml('removed', escapeHtml(before || ' ')));
+          } else {
+            rendered.push(renderDiffLineHtml('added', escapeHtml(after || ' ')));
+          }
+        }
+      }
+      return rendered.join('');
     }
 
-    function changeLabel(changeType) {
-      return {
-        added: 'Added',
-        removed: 'Removed',
-        modified: 'Modified',
-        unchanged: 'Unchanged',
-      }[changeType] || changeType;
+    function renderPlainDiffLine(line) {
+      const kind = line.startsWith('+') ? 'added' : (line.startsWith('-') ? 'removed' : '');
+      const content = kind ? line.slice(1) : line.replace(/^ /, '');
+      return renderDiffLineHtml(kind, escapeHtml(content || ' '));
+    }
+
+    function renderDiffLineHtml(kind, html) {
+      return `<span class="diff-line ${escapeHtml(kind)}">${html}</span>`;
+    }
+
+    function inlineDiffHtml(before, after) {
+      if (before === after) {
+        const html = escapeHtml(before);
+        return { before: html, after: html };
+      }
+
+      const beforeChars = Array.from(before);
+      const afterChars = Array.from(after);
+      let prefix = 0;
+      while (
+        prefix < beforeChars.length &&
+        prefix < afterChars.length &&
+        beforeChars[prefix] === afterChars[prefix]
+      ) {
+        prefix += 1;
+      }
+
+      let suffix = 0;
+      while (
+        suffix < beforeChars.length - prefix &&
+        suffix < afterChars.length - prefix &&
+        beforeChars[beforeChars.length - 1 - suffix] === afterChars[afterChars.length - 1 - suffix]
+      ) {
+        suffix += 1;
+      }
+
+      const beforeMiddle = beforeChars.slice(prefix, beforeChars.length - suffix);
+      const afterMiddle = afterChars.slice(prefix, afterChars.length - suffix);
+      const prefixHtml = escapeHtml(beforeChars.slice(0, prefix).join(''));
+      const suffixHtml = escapeHtml(beforeChars.slice(beforeChars.length - suffix).join(''));
+
+      if (beforeMiddle.length * afterMiddle.length > 160000) {
+        return {
+          before: prefixHtml + wrapInlineDiff('removed', beforeMiddle.join('')) + suffixHtml,
+          after: prefixHtml + wrapInlineDiff('added', afterMiddle.join('')) + suffixHtml,
+        };
+      }
+
+      const ops = diffCharOps(beforeMiddle, afterMiddle);
+      let beforeHtml = prefixHtml;
+      let afterHtml = prefixHtml;
+      for (const op of ops) {
+        if (op.kind === 'equal') {
+          const html = escapeHtml(op.text);
+          beforeHtml += html;
+          afterHtml += html;
+        } else if (op.kind === 'removed') {
+          beforeHtml += wrapInlineDiff('removed', op.text);
+        } else {
+          afterHtml += wrapInlineDiff('added', op.text);
+        }
+      }
+      return { before: beforeHtml + suffixHtml, after: afterHtml + suffixHtml };
+    }
+
+    function diffCharOps(beforeChars, afterChars) {
+      const rows = beforeChars.length + 1;
+      const cols = afterChars.length + 1;
+      const scores = new Uint32Array(rows * cols);
+      for (let row = beforeChars.length - 1; row >= 0; row -= 1) {
+        for (let col = afterChars.length - 1; col >= 0; col -= 1) {
+          const offset = row * cols + col;
+          scores[offset] = beforeChars[row] === afterChars[col]
+            ? scores[(row + 1) * cols + col + 1] + 1
+            : Math.max(scores[(row + 1) * cols + col], scores[row * cols + col + 1]);
+        }
+      }
+
+      const ops = [];
+      let row = 0;
+      let col = 0;
+      while (row < beforeChars.length || col < afterChars.length) {
+        if (row < beforeChars.length && col < afterChars.length && beforeChars[row] === afterChars[col]) {
+          pushDiffOp(ops, 'equal', beforeChars[row]);
+          row += 1;
+          col += 1;
+        } else if (
+          col < afterChars.length &&
+          (row === beforeChars.length || scores[row * cols + col + 1] >= scores[(row + 1) * cols + col])
+        ) {
+          pushDiffOp(ops, 'added', afterChars[col]);
+          col += 1;
+        } else {
+          pushDiffOp(ops, 'removed', beforeChars[row]);
+          row += 1;
+        }
+      }
+      return ops;
+    }
+
+    function pushDiffOp(ops, kind, char) {
+      const last = ops[ops.length - 1];
+      if (last && last.kind === kind) {
+        last.text += char;
+      } else {
+        ops.push({ kind, text: char });
+      }
+    }
+
+    function wrapInlineDiff(kind, value) {
+      if (!value) return '';
+      return `<mark class="inline-diff ${escapeHtml(kind)}">${escapeHtml(value)}</mark>`;
+    }
+
+    function jumpChange(direction) {
+      const rows = Array.from(document.querySelectorAll('.diff-row:not(.unchanged)'));
+      if (!rows.length) return;
+      state.currentChangeIndex = Math.min(
+        Math.max((state.currentChangeIndex || 0) + direction, 0),
+        rows.length - 1
+      );
+      rows[state.currentChangeIndex].open = true;
+      rows[state.currentChangeIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
     async function openNode(row) {
       const node = await api('/api/node', { id: row.id });
+      state.selectedNodeId = node.id;
+      openDetail();
       el('detailBadge').textContent = node.node_eid;
       const lines = (node.lines || []).map(line => (
         `<tr><td>${line.line_no}</td><td>${escapeHtml(line.origin_version_label)}</td><td>${escapeHtml(line.text)}</td></tr>`
       )).join('');
       const history = (node.history || []).map(item => (
-        `<tr><td>${item.revision_id}</td><td>${escapeHtml(item.to_label)}</td><td>${escapeHtml(item.change_type)}</td></tr>`
+        `<tr><td>${item.revision_id}</td><td>${escapeHtml(item.to_label)}</td><td>${escapeHtml(changeLabel(item.change_type))}</td></tr>`
       )).join('');
       el('detail').innerHTML = `
-        <div class="detail-grid">
-          <div class="muted">Work</div><div>${escapeHtml(node.work_id)}</div>
-          <div class="muted">Version</div><div>${escapeHtml(node.version_label)}</div>
-          <div class="muted">Type</div><div>${escapeHtml(node.node_type)}</div>
-          <div class="muted">Number</div><div>${escapeHtml(node.num || '')}</div>
-          <div class="muted">Heading</div><div>${escapeHtml(node.heading || '')}</div>
-          <div class="muted">Hash</div><div class="mono">${escapeHtml(node.text_hash || '')}</div>
+        <div class="copy-row">
+          <button data-copy-node-text>複製條文</button>
+          <button data-copy-node-id>複製節點 ID</button>
+          <button data-close-detail>收合詳細資料</button>
         </div>
-        <h3>Text</h3>
+        <div class="detail-grid">
+          <div class="muted">法規集</div><div>${escapeHtml(node.work_id)}</div>
+          <div class="muted">版本</div><div>${escapeHtml(node.version_label)} ${escapeHtml(languageLabel(node.language))}</div>
+          <div class="muted">類型</div><div>${escapeHtml(nodeTypeLabel(node.node_type))}</div>
+          <div class="muted">條號</div><div>${escapeHtml(node.num || '')}</div>
+          <div class="muted">標題</div><div>${escapeHtml(node.heading || '')}</div>
+          <div class="muted">節點 ID</div><div class="mono">${escapeHtml(node.node_eid || '')}</div>
+          <div class="muted">文字雜湊</div><div class="mono">${escapeHtml(node.text_hash || '')}</div>
+        </div>
+        <h3>條文內容</h3>
         <pre>${escapeHtml(node.text || '')}</pre>
-        <h3 style="margin-top:12px">Blame</h3>
-        <table><thead><tr><th>Line</th><th>Origin</th><th>Text</th></tr></thead><tbody>${lines}</tbody></table>
-        <h3 style="margin-top:12px">History</h3>
-        <table><thead><tr><th>Revision</th><th>To</th><th>Type</th></tr></thead><tbody>${history}</tbody></table>
+        <h3 style="margin-top:12px">逐行來源</h3>
+        <table><thead><tr><th>行</th><th>來源版本</th><th>文字</th></tr></thead><tbody>${lines}</tbody></table>
+        <h3 style="margin-top:12px">版本紀錄</h3>
+        <table><thead><tr><th>修訂</th><th>目標版本</th><th>類型</th></tr></thead><tbody>${history}</tbody></table>
       `;
+      document.querySelector('[data-copy-node-text]').addEventListener('click', () => navigator.clipboard.writeText(node.text || ''));
+      document.querySelector('[data-copy-node-id]').addEventListener('click', () => navigator.clipboard.writeText(node.node_eid || ''));
+      document.querySelector('[data-close-detail]').addEventListener('click', setDetailEmpty);
     }
 
     async function renderSearch() {
-      el('listTitle').textContent = 'Search';
+      el('listTitle').textContent = '搜尋';
+      setDetailEmpty();
       const q = state.searchQuery.trim();
       if (!q) {
-        el('list').innerHTML = '<div class="muted">Enter a query.</div>';
+        el('list').innerHTML = '<div class="empty-state"><strong>輸入關鍵字後搜尋目前版本。</strong>可搜尋全文、標題、條號或節點 ID；結果會顯示數量並可點選查看詳細資料。</div>';
         return;
       }
       const payload = await api('/api/search', {
         q,
+        scope: state.searchScope,
         work_id: state.selectedWork && state.selectedWork.id,
         expression_id: state.selectedExpression && state.selectedExpression.id,
       });
-      el('list').innerHTML = table([
-        { label: 'Version', value: row => row.version_label },
-        { label: 'Type', value: row => row.node_type },
-        { label: 'Num', value: row => row.num || '' },
-        { label: 'eId', value: row => row.node_eid },
-        { label: 'Preview', value: row => row.preview || '' },
-      ], payload.results, openNode);
+      el('list').innerHTML = `
+        <div class="empty-state"><strong>${escapeHtml(payload.results.length)} 筆結果</strong>搜尋範圍：${escapeHtml(el('searchScope').selectedOptions[0].textContent)}</div>
+        ${table([
+          { label: '版本', value: row => row.version_label },
+          { label: '類型', value: row => nodeTypeLabel(row.node_type) },
+          { label: '條號', value: row => row.num || '' },
+          { label: '內容摘要', value: row => row.preview || '' },
+        ], payload.results, openNode, { className: 'node-table' })}
+      `;
     }
 
     async function renderRevisions() {
-      el('listTitle').textContent = 'Revisions';
-      el('detail').innerHTML = '<div class="muted">Select a revision.</div>';
+      el('listTitle').textContent = '修訂紀錄';
+      setDetailEmpty();
       if (!state.selectedWork) {
-        el('list').innerHTML = '<div class="muted">No work selected.</div>';
+        el('list').innerHTML = '<div class="muted">尚未選取法規集。</div>';
         return;
       }
       const payload = await api('/api/revisions', { work_id: state.selectedWork.id });
       el('list').innerHTML = table([
         { label: 'ID', value: row => row.id },
-        { label: 'From', value: row => row.from_label || '(initial)' },
-        { label: 'To', value: row => row.to_label },
-        { label: '+', value: row => row.nodes_added },
-        { label: '-', value: row => row.nodes_removed },
-        { label: '~', value: row => row.nodes_modified },
-        { label: '=', value: row => row.nodes_unchanged },
+        { label: '來源版本', value: row => row.from_label || '(初始)' },
+        { label: '目標版本', value: row => row.to_label },
+        { label: '新增', value: row => row.nodes_added },
+        { label: '刪除', value: row => row.nodes_removed },
+        { label: '修改', value: row => row.nodes_modified },
+        { label: '未變更', value: row => row.nodes_unchanged },
       ], payload.revisions, openRevision);
     }
 
     async function openRevision(row) {
       const payload = await api('/api/changes', { revision_id: row.id, limit: 1000 });
       const rows = payload.changes.map(change => (
-        `<tr data-change-id="${change.id}" data-clickable="true"><td>${change.id}</td><td>${escapeHtml(change.change_type)}</td><td>${escapeHtml(change.node_type || '')}</td><td>${escapeHtml(change.node_eid || '')}</td><td>${escapeHtml(change.heading || '')}</td></tr>`
+        `<tr data-change-id="${change.id}" data-clickable="true"><td>${change.id}</td><td>${escapeHtml(changeLabel(change.change_type))}</td><td>${escapeHtml(nodeTypeLabel(change.node_type))}</td><td>${escapeHtml(change.node_eid || '')}</td><td>${escapeHtml(change.heading || '')}</td></tr>`
       )).join('');
       el('detailBadge').textContent = `Revision ${row.id}`;
-      el('detail').innerHTML = `<table><thead><tr><th>ID</th><th>Type</th><th>Node</th><th>eId</th><th>Heading</th></tr></thead><tbody>${rows}</tbody></table><pre id="changeDiff" style="margin-top:12px"></pre>`;
+      openDetail();
+      el('detail').innerHTML = `<div class="copy-row"><button data-close-detail>收合詳細資料</button></div><table><thead><tr><th>ID</th><th>類型</th><th>節點</th><th>節點 ID</th><th>標題</th></tr></thead><tbody>${rows}</tbody></table><pre id="changeDiff" style="margin-top:12px"></pre>`;
+      document.querySelector('[data-close-detail]').addEventListener('click', setDetailEmpty);
       document.querySelectorAll('[data-change-id]').forEach(tr => {
         tr.addEventListener('click', async () => {
           const change = await api('/api/change', { id: tr.dataset.changeId });
@@ -1577,9 +2102,10 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function renderXml() {
-      el('listTitle').textContent = 'AKN XML';
+      el('listTitle').textContent = '原始 XML';
+      setDetailEmpty();
       if (!state.selectedExpression) {
-        el('list').innerHTML = '<div class="muted">No expression selected.</div>';
+        el('list').innerHTML = '<div class="muted">尚未選取版本。</div>';
         return;
       }
       const payload = await api('/api/xml', { expression_id: state.selectedExpression.id });
@@ -1597,6 +2123,7 @@ INDEX_HTML = """<!doctype html>
 
     el('searchBtn').addEventListener('click', async () => {
       state.searchQuery = el('searchInput').value;
+      state.searchScope = el('searchScope').value;
       state.view = 'search';
       document.querySelectorAll('[data-view]').forEach(tab => tab.classList.toggle('active', tab.dataset.view === 'search'));
       await renderView();
